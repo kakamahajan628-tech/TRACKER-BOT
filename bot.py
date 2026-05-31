@@ -171,7 +171,7 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             
             if order_flow_status == "KHATRA_GAP": future_pred, c_score = "🎰 VOID_TRAP_MATH", c_score - 3
             elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked and is_delta_divergent and is_velocity_decaying: future_pred, c_score = "🎯 SHORT_THOKO_ABHI", c_score - 5
-            elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "🚨 DUM_KHTM_SHORT", c_score - 3
+            elif is_vol_exhausted fuel and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "🚨 DUM_KHTM_SHORT", c_score - 3
             elif last_vol > (last_vol_ma * 2.5) and last_delta > 0: future_pred, c_score = "⚠️ FAKE_PUMP_MAT_SHORT", c_score + 2
             else: future_pred = "⏳ RUKO_SET_HONE_DO"
         else:
@@ -203,19 +203,29 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
         logging.error(f"Quant calculation error: {e}")
         return "Error", "Error", "Error", "Error", 0.0, 0
 
+# 🌟 DYNAMIC STARTUP FUNCTION (Brought Back & Verified)
+async def send_startup_message(application: Application):
+    if USER_CHAT_ID:
+        try:
+            await asyncio.sleep(3)
+            await application.bot.send_message(
+                chat_id=USER_CHAT_ID,
+                text="🚀 <b>QUANT TERMINAL RE-DEPLOY SUCCESSFUL</b>\nButtons engine setup verified. Type /panel to open custom matrix grid.",
+                parse_mode="HTML"
+            )
+        except Exception as e: logging.error(f"Startup fail: {e}")
+
 # 🎛️ DYNAMIC BUTTON CONTROL PANEL GENERATOR
 def build_control_panel(chat_id):
     pairs = TRACKED_PAIRS.get(chat_id, set())
     keyboard = []
     
-    # Har coin ke liye ek raw dynamic button row
     for symbol in sorted(list(pairs)):
         keyboard.append([
             InlineKeyboardButton(f"📊 {symbol}", callback_data=f"view_{symbol}"),
             InlineKeyboardButton("🛑 STOP", callback_data=f"stop_{symbol}")
         ])
     
-    # Add Coin Option at bottom
     keyboard.append([InlineKeyboardButton("➕ Naya Coin Add Karo", callback_data="add_coin_click")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -238,7 +248,6 @@ async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-# BUTTON CLICK HANDLER (CALLBACK QUERY Core)
 async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat_id
@@ -256,14 +265,12 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
         if symbol in TRACKED_PAIRS[chat_id]:
             TRACKED_PAIRS[chat_id].remove(symbol)
             await query.message.reply_text(f"🛑 <b>{symbol}</b> ko list se hata diya gaya hai bhai.", parse_mode="HTML")
-            # Refresh control panel layout matrix
             await query.edit_message_reply_markup(reply_markup=build_control_panel(chat_id))
             
     elif data.startswith("view_"):
         symbol = data.replace("view_", "")
         await query.message.reply_text(f"🔍 <b>{symbol}</b> ki live monitoring matrix chalu hai, har 5 minute par report aayegi.", parse_mode="HTML")
 
-# USER TEXT INPUT HANDLER (Catching new coin names)
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text_received = update.message.text.strip().upper()
