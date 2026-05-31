@@ -171,7 +171,7 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             
             if order_flow_status == "KHATRA_GAP": future_pred, c_score = "🎰 VOID_TRAP_MATH", c_score - 3
             elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked and is_delta_divergent and is_velocity_decaying: future_pred, c_score = "🎯 SHORT_THOKO_ABHI", c_score - 5
-            elif is_vol_exhausted fuel and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "🚨 DUM_KHTM_SHORT", c_score - 3
+            elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "🚨 DUM_KHTM_SHORT", c_score - 3
             elif last_vol > (last_vol_ma * 2.5) and last_delta > 0: future_pred, c_score = "⚠️ FAKE_PUMP_MAT_SHORT", c_score + 2
             else: future_pred = "⏳ RUKO_SET_HONE_DO"
         else:
@@ -203,19 +203,19 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
         logging.error(f"Quant calculation error: {e}")
         return "Error", "Error", "Error", "Error", 0.0, 0
 
-# 🌟 DYNAMIC STARTUP FUNCTION (Brought Back & Verified)
+# Startup message checker node
 async def send_startup_message(application: Application):
     if USER_CHAT_ID:
         try:
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT TERMINAL RE-DEPLOY SUCCESSFUL</b>\nButtons engine setup verified. Type /panel to open custom matrix grid.",
+                text="🚀 <b>QUANT TERMINAL RE-DEPLOY SUCCESSFUL</b>\nSyntax error poori tarah fix ho gaya hai. Panel chalane ke liye /panel type karein.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
 
-# 🎛️ DYNAMIC BUTTON CONTROL PANEL GENERATOR
+# Dynamic keyboard matrix core menu
 def build_control_panel(chat_id):
     pairs = TRACKED_PAIRS.get(chat_id, set())
     keyboard = []
@@ -291,7 +291,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-# Background Monitoring 5-Minute Execution Loop
+# Background Monitoring 5-Minute Loop Engine
 async def monitoring_job(application: Application):
     while True:
         await asyncio.sleep(300)
