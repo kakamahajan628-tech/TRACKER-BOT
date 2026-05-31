@@ -84,6 +84,8 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         macd = ta.trend.MACD(close=df['close'], window_fast=macd_w, window_slow=macd_w*2, window_sign=3)
         df['macd_line'] = macd.macd()
         
+        # Trend indicators: EMA 50 and EMA 200
+        df['ema_50'] = ta.trend.ema_indicator(close=df['close'], window=min(50, total_candles))
         if total_candles >= 20:
             df['ema_200'] = ta.trend.ema_indicator(close=df['close'], window=min(200, total_candles))
             bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
@@ -94,7 +96,7 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
 
         df = df.dropna().reset_index(drop=True)
         if len(df) == 0:
-            return "NEW", "Discovery", "Scanning", "Clear", "Velocity Load", ohlcv_data[-1][4]
+            return "Discovery", "Discovery", "Scanning", "Clear", "Velocity Load", ohlcv_data[-1][4]
 
         prices = df['close'].to_numpy()
         highs = df['high'].to_numpy()
@@ -110,10 +112,33 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         last_vol_ma = vol_mas[-1] if len(vol_mas) > 0 and not pd.isna(vol_mas[-1]) else 1.0
         last_vwap = vwaps[-1]
         
-        trend = "Neutral"
-        if 'ema_200' in df and len(df['ema_200']) > 0 and not pd.isna(df['ema_200'].iloc[-1]):
-            trend = "BULL" if last_price >= df['ema_200'].iloc[-1] else "BEAR"
+        # 1. ADVANCED TREND MATRIX DETERMINATION
+        last_ema50 = df['ema_50'].iloc[-1] if 'ema_50' in df and len(df['ema_50']) > 0 else last_price
+        last_ema200 = df['ema_200'].iloc[-1] if 'ema_200' in df and len(df['ema_200']) > 0 else last_price
         
+        p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
+        
+        structure_trend = "Neutral"
+        if total_candles <= 25:
+            if last_price > last_ema50: structure_trend = "MICRO_BULL"
+            elif last_price < last_ema50: structure_trend = "MICRO_BEAR"
+        else:
+            if len(p_p) >= 2 and len(p_t) >= 2:
+                # Pivot comparison logic
+                higher_high = p_p[-1][1] > p_p[-2][1]
+                higher_low = p_t[-1][1] > p_t[-2][1]
+                lower_high = p_p[-1][1] < p_p[-2][1]
+                lower_low = p_t[-1][1] < p_t[-2][1]
+                
+                if higher_high and higher_low and last_price > last_ema200: structure_trend = "STRG_BULL"
+                elif lower_high and lower_low and last_price < last_ema200: structure_trend = "STRG_BEAR"
+                elif last_price > last_ema200: structure_trend = "WK_BULL"
+                elif last_price < last_ema200: structure_trend = "WK_BEAR"
+            else:
+                if last_price >= last_ema200: structure_trend = "BULL"
+                else: structure_trend = "BEAR"
+
+        # Volatility Squeeze Evaluation
         squeeze_status = "Stable"
         if total_candles >= 20 and len(bbws) >= 20:
             if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "SQUEEZE"
@@ -132,28 +157,26 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
             elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2:
                 future_pred = "TOP WHALE SELLING"
         else:
-            p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
             if len(p_p) >= 2 and len(p_t) >= 2:
                 recent_high = p_p[-1][1]
                 recent_low = p_t[-1][1]
-                if last_price > recent_high and trend == "BEAR": future_pred = "BULLISH MSB"
-                elif last_price < recent_low and trend == "BULL": future_pred = "BEARISH MSB"
+                if last_price > recent_high and "BEAR" in structure_trend: future_pred = "BULLISH MSB"
+                elif last_price < recent_low and "BULL" in structure_trend: future_pred = "BEARISH MSB"
                 elif lows[-1] < recent_low and last_price > recent_low: future_pred = "LIQ SWEEP (PUMP)"
                 elif highs[-1] > recent_high and last_price < recent_high: future_pred = "LIQ SWEEP (DUMP)"
 
         if future_pred == "Scanning":
-            if last_price > (last_vwap * 1.05): future_pred = "VWAP REVERSION DOWN"
-            elif last_price < (last_vwap * 0.95): future_pred = "VWAP REVERSION UP"
+            if last_price > (last_vwap * 1.05): future_pred = "VWAP REV DOWN"
+            elif last_price < (last_vwap * 0.95): future_pred = "VWAP REV UP"
 
         anomaly_status = "Clear"
         if total_candles >= 15:
-            p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
             if len(p_t) >= 2 and len(ind_vals) >= 2:
                 if p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: anomaly_status = "REG_BULL"
             if len(p_p) >= 2 and len(ind_vals) >= 2:
                 if p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: anomaly_status = "REG_BEAR"
                 
-        return trend, squeeze_status, order_flow, anomaly_status, future_pred, last_price
+        return structure_trend, squeeze_status, order_flow, anomaly_status, future_pred, last_price
     except Exception as e:
         logging.error(f"Error inside predictive quant engine: {e}")
         return "Error", "Error", "Error", "Error", "Error", 0.0
@@ -165,7 +188,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT TERMINAL RE-INITIALIZED</b>\nParse entities protection activated. HTML matrix ready. Use /track.",
+                text="🚀 <b>TREND-MATRIX QUANT TERMINAL ONLINE</b>\nMulti-timeframe trend integration completed. HTML formatting loaded. Use /track.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -173,9 +196,9 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ <b>PREDICTIVE DYNAMIC TERMINAL V10.5</b>\n\n"
+        "⚡ <b>PREDICTIVE TREND TERMINAL V11.0</b>\n\n"
         "Commands:\n"
-        "/track COIN/USDT - Load pair into hybrid tracking loop\n"
+        "/track COIN/USDT - Load pair into structural trend array\n"
         "/stop COIN/USDT - Unmap tracking vectors\n"
         "/status - View active dashboard watchlist", 
         parse_mode="HTML"
@@ -189,7 +212,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Mapped <b>{symbol}</b> to Dynamic Discovery Array. First stream in 5 minutes.", parse_mode="HTML")
+    await update.message.reply_text(f"✅ Mapped <b>{symbol}</b> to Trend Analytics Engine. Streaming cycles configured to 5 minutes.", parse_mode="HTML")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -216,7 +239,6 @@ async def monitoring_job(application: Application):
                 timeframe_data = {}
                 last_price = 0.0
                 node_source = "Unknown"
-                macro_trend = "Unknown"
                 has_data = False
 
                 for tf in TIMEFRAMES:
@@ -224,31 +246,30 @@ async def monitoring_job(application: Application):
                         ohlcv, exchange_obj = fetch_ohlcv_permitted(symbol, tf, limit=150)
                         if ohlcv is None: continue
                         
-                        trend, squeeze, order_flow, anomaly, prediction, price = analyze_predictive_metrics(ohlcv, exchange_obj, symbol)
-                        if trend == "Error": continue
+                        structure_trend, squeeze, order_flow, anomaly, prediction, price = analyze_predictive_metrics(ohlcv, exchange_obj, symbol)
+                        if structure_trend == "Error": continue
 
                         last_price = price
                         node_source = exchange_obj.name
-                        macro_trend = trend
-                        timeframe_data[tf] = (squeeze, order_flow, anomaly, prediction)
+                        timeframe_data[tf] = (squeeze, order_flow, anomaly, prediction, structure_trend)
                         has_data = True
                     except Exception as loop_err: logging.error(f"Processing loop err: {loop_err}")
 
                 if has_data and timeframe_data:
+                    # Determine global header state
                     is_launch = any("VOL_LAUNCH" in data[3] for data in timeframe_data.values())
                     header = "⚡ ALERT: MICRO VOLUME VELOCITY BLAST" if is_launch else "🛰️ QUANT PREDICTIVE MATRIX FEED"
                     
                     msg = f"<b>{header}: {symbol}</b>\n"
-                    msg += f"• Price: ${last_price:,.6f}\n"
-                    msg += f"• Macro Structure: {macro_trend}\n"
+                    msg += f"• Price: ${last_price:,.4f}\n"
                     msg += f"• Execution Node: {node_source}\n"
                     msg += "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-                    msg += "<code>TF    │ SQUEEZE   │ ORDERBOOK FLOW   │ FUTURE PRED</code>\n"
-                    msg += "─────────────────────────────────────────\n"
+                    msg += "<code>TF    │ TREND     │ SQUEEZE   │ ORDERBOOK        │ FUTURE PRED</code>\n"
+                    msg += "───────────────────────────────────────────────────────\n"
                     
                     for tf in TIMEFRAMES:
                         if tf in timeframe_data:
-                            squeeze, order_flow, anomaly, prediction = timeframe_data[tf]
+                            squeeze, order_flow, anomaly, prediction, structure_trend = timeframe_data[tf]
                             
                             if anomaly != "Clear":
                                 display_pred = prediction if "Scanning" not in prediction else anomaly
@@ -257,10 +278,10 @@ async def monitoring_job(application: Application):
                             else:
                                 display_pred = prediction
                                 
-                            msg += f"<code>{tf:<6}│ {squeeze:<10}│ {order_flow:<17}│</code> {display_pred}\n"
+                            msg += f"<code>{tf:<6}│ {structure_trend:<10}│ {squeeze:<10}│ {order_flow:<17}│</code> {display_pred}\n"
                     
-                    msg += "─────────────────────────────────────────\n"
-                    msg += "💡 <i>Predictive Key: VOL_LAUNCH marks instant retail rush. MSB rules map mid-term flips. LIQ SWEEPS detect stop hunts.</i>"
+                    msg += "───────────────────────────────────────────────────────\n"
+                    msg += "💡 <i>Predictive Key: STRG_BULL/BEAR flags mechanical macro trend state. VOL_LAUNCH marks fast flow spikes.</i>"
                     
                     try:
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
@@ -269,7 +290,7 @@ async def monitoring_job(application: Application):
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "HTML Safe Engine Active", 200
+def health_check(): return "Trend Core Matrix System Live", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
