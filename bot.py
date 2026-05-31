@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import ccxt
 import ta
+import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from threading import Thread
@@ -52,13 +53,37 @@ def fetch_orderbook_imbalance(exchange, symbol):
         total_bids = sum([bid[1] for bid in orderbook['bids']])
         total_asks = sum([ask[1] for ask in orderbook['asks']])
         total_volume = total_bids + total_asks
-        if total_volume == 0: return "50% Net"
+        if total_volume == 0: return 50.0, "Neutral"
         bid_ratio = (total_bids / total_volume) * 100
-        if bid_ratio >= 65: return f"{bid_ratio:.0f}% Bid Heavy"
-        elif bid_ratio <= 35: return f"{(100 - bid_ratio):.0f}% Ask Heavy"
-        return "Neutral"
+        if bid_ratio >= 65: return bid_ratio, f"{bid_ratio:.0f}% Bid Heavy"
+        elif bid_ratio <= 35: return bid_ratio, f"{(100 - bid_ratio):.0f}% Ask Heavy"
+        return bid_ratio, "Neutral"
     except Exception:
-        return "Scanning"
+        return 50.0, "Scanning"
+
+def scrape_public_onchain_intel(symbol):
+    try:
+        clean_ticker = symbol.split('/')[0].upper()
+        url = f"https://api.coingecko.com/api/v3/search?query={clean_ticker}"
+        res = requests.get(url, timeout=5).json()
+        
+        if 'coins' in res and len(res['coins']) > 0:
+            coin_id = res['coins'][0]['id']
+            detail_url = f"https://api.coingecko.com/api/v3/coins/{coin_id}?localization=false&tickers=false&market_data=true&community_data=false&developer_data=false&sparkline=false"
+            coin_data = requests.get(detail_url, timeout=5).json()
+            
+            mcap = coin_data.get('market_data', {}).get('market_cap', {}).get('usd', 0)
+            vol_24h = coin_data.get('market_data', {}).get('total_volume', {}).get('usd', 0)
+            price_change = coin_data.get('market_data', {}).get('price_change_percentage_24h', 0)
+            
+            if vol_24h > 0 and mcap > 0:
+                v2m_ratio = vol_24h / mcap
+                if price_change < -10 and v2m_ratio > 0.35: return "UNDERGROUND_ACC"
+                elif v2m_ratio > 0.40: return "HEAVY_WHALE_ACC"
+                elif v2m_ratio > 0.20: return "ACTIVE_FLOW"
+        return "STABLE_HOLD"
+    except Exception:
+        return "ROUTING"
 
 def find_peaks_and_troughs(price, indicator, window=2):
     p_peaks, p_troughs = [], []
@@ -80,11 +105,12 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         typical_price = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
         
+        # Core Indicators: RSI & MACD
+        df['rsi'] = ta.momentum.rsi(close=df['close'], window=min(14, max(4, total_candles-1)))
         macd_w = min(12, max(2, int(total_candles/3)))
         macd = ta.trend.MACD(close=df['close'], window_fast=macd_w, window_slow=macd_w*2, window_sign=3)
         df['macd_line'] = macd.macd()
         
-        # Trend indicators: EMA 50 and EMA 200
         df['ema_50'] = ta.trend.ema_indicator(close=df['close'], window=min(50, total_candles))
         if total_candles >= 20:
             df['ema_200'] = ta.trend.ema_indicator(close=df['close'], window=min(200, total_candles))
@@ -96,7 +122,7 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
 
         df = df.dropna().reset_index(drop=True)
         if len(df) == 0:
-            return "Discovery", "Discovery", "Scanning", "Clear", "Velocity Load", ohlcv_data[-1][4]
+            return "Discovery", "Discovery", "Scanning", "Clear", "Velocity Load", ohlcv_data[-1][4], 0
 
         prices = df['close'].to_numpy()
         highs = df['high'].to_numpy()
@@ -106,13 +132,16 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         ind_vals = df['macd_line'].to_numpy() if 'macd_line' in df else prices
         bbws = df['bbw'].to_numpy() if 'bbw' in df else np.zeros(len(df))
         vwaps = df['vwap'].to_numpy()
+        rsis = df['rsi'].to_numpy()
         
         last_price = prices[-1]
         last_vol = volumes[-1]
         last_vol_ma = vol_mas[-1] if len(vol_mas) > 0 and not pd.isna(vol_mas[-1]) else 1.0
         last_vwap = vwaps[-1]
+        last_rsi = rsis[-1] if len(rsis) > 0 else 50.0
         
-        # 1. ADVANCED TREND MATRIX DETERMINATION
+        c_score = 0
+        
         last_ema50 = df['ema_50'].iloc[-1] if 'ema_50' in df and len(df['ema_50']) > 0 else last_price
         last_ema200 = df['ema_200'].iloc[-1] if 'ema_200' in df and len(df['ema_200']) > 0 else last_price
         
@@ -120,25 +149,39 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         
         structure_trend = "Neutral"
         if total_candles <= 25:
-            if last_price > last_ema50: structure_trend = "MICRO_BULL"
-            elif last_price < last_ema50: structure_trend = "MICRO_BEAR"
+            if last_price > last_ema50: 
+                structure_trend = "MICRO_BULL"
+                c_score += 1
+            elif last_price < last_ema50: 
+                structure_trend = "MICRO_BEAR"
+                c_score -= 1
         else:
             if len(p_p) >= 2 and len(p_t) >= 2:
-                # Pivot comparison logic
                 higher_high = p_p[-1][1] > p_p[-2][1]
                 higher_low = p_t[-1][1] > p_t[-2][1]
                 lower_high = p_p[-1][1] < p_p[-2][1]
                 lower_low = p_t[-1][1] < p_t[-2][1]
                 
-                if higher_high and higher_low and last_price > last_ema200: structure_trend = "STRG_BULL"
-                elif lower_high and lower_low and last_price < last_ema200: structure_trend = "STRG_BEAR"
-                elif last_price > last_ema200: structure_trend = "WK_BULL"
-                elif last_price < last_ema200: structure_trend = "WK_BEAR"
+                if higher_high and higher_low and last_price > last_ema200: 
+                    structure_trend = "STRG_BULL"
+                    c_score += 2
+                elif lower_high and lower_low and last_price < last_ema200: 
+                    structure_trend = "STRG_BEAR"
+                    c_score -= 2
+                elif last_price > last_ema200: 
+                    structure_trend = "WK_BULL"
+                    c_score += 1
+                elif last_price < last_ema200: 
+                    structure_trend = "WK_BEAR"
+                    c_score -= 1
             else:
-                if last_price >= last_ema200: structure_trend = "BULL"
-                else: structure_trend = "BEAR"
+                if last_price >= last_ema200: 
+                    structure_trend = "BULL"
+                    c_score += 1
+                else: 
+                    structure_trend = "BEAR"
+                    c_score -= 1
 
-        # Volatility Squeeze Evaluation
         squeeze_status = "Stable"
         if total_candles >= 20 and len(bbws) >= 20:
             if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "SQUEEZE"
@@ -146,24 +189,62 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         else:
             squeeze_status = "Discovery"
             
-        order_flow = fetch_orderbook_imbalance(exchange, symbol)
+        bid_pct, order_flow = fetch_orderbook_imbalance(exchange, symbol)
+        if "Bid" in order_flow: c_score += 1
+        elif "Ask" in order_flow: c_score -= 1
         
         future_pred = "Scanning"
         
-        if total_candles <= 25:
-            if last_vol > (last_vol_ma * 3.0):
-                if last_price >= prices[-2]: future_pred = "VOL_LAUNCH (PUMP)"
-                else: future_pred = "DUMP_BURST (CRASH)"
-            elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2:
-                future_pred = "TOP WHALE SELLING"
+        # 🛡️ THE ANTI-LIQUIDATION RSI EXHAUSTION CORE
+        if last_rsi >= 75:
+            # Check for Volume Climax Exhaustion & Heavy Sell Walls (Ask Heavy)
+            is_vol_exhausted = last_vol < last_vol_ma
+            is_sell_wall_heavy = bid_pct <= 35
+            is_rsi_hooked = len(rsis) >= 2 and rsis[-1] < rsis[-2] # RSI bending down
+            
+            if is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked:
+                future_pred = "🚨 EXHAUST_SHORT_CONFIRM"
+                c_score -= 3
+            elif last_vol > (last_vol_ma * 2.5):
+                future_pred = "⚠️ FOOL_BULL_RUSH (DO NOT SHORT)"
+                c_score += 2
+            else:
+                future_pred = "⏳ RSI_HIGH (WAIT_PIVOT)"
         else:
-            if len(p_p) >= 2 and len(p_t) >= 2:
-                recent_high = p_p[-1][1]
-                recent_low = p_t[-1][1]
-                if last_price > recent_high and "BEAR" in structure_trend: future_pred = "BULLISH MSB"
-                elif last_price < recent_low and "BULL" in structure_trend: future_pred = "BEARISH MSB"
-                elif lows[-1] < recent_low and last_price > recent_low: future_pred = "LIQ SWEEP (PUMP)"
-                elif highs[-1] > recent_high and last_price < recent_high: future_pred = "LIQ SWEEP (DUMP)"
+            if total_candles <= 25:
+                if last_vol > (last_vol_ma * 3.0):
+                    if last_price >= prices[-2]: 
+                        future_pred = "VOL_LAUNCH (PUMP)"
+                        c_score += 2
+                    else: 
+                        future_pred = "DUMP_BURST (CRASH)"
+                        c_score -= 2
+                elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2:
+                    future_pred = "TOP WHALE SELLING"
+                    c_score -= 1
+            else:
+                if len(p_p) >= 2 and len(p_t) >= 2:
+                    recent_high = p_p[-1][1]
+                    recent_low = p_t[-1][1]
+                    
+                    if last_price > recent_high and bid_pct <= 35:
+                        future_pred = "BREAKOUT_TRAP (SHORT)"
+                        c_score -= 2
+                    elif last_price < recent_low and bid_pct >= 65:
+                        future_pred = "BREAKOUT_TRAP (LONG)"
+                        c_score += 2
+                    elif last_price > recent_high and "BEAR" in structure_trend: 
+                        future_pred = "BULLISH MSB"
+                        c_score += 2
+                    elif last_price < recent_low and "BULL" in structure_trend: 
+                        future_pred = "BEARISH MSB"
+                        c_score -= 2
+                    elif lows[-1] < recent_low and last_price > recent_low: 
+                        future_pred = "LIQ SWEEP (PUMP)"
+                        c_score += 2
+                    elif highs[-1] > recent_high and last_price < recent_high: 
+                        future_pred = "LIQ SWEEP (DUMP)"
+                        c_score -= 2
 
         if future_pred == "Scanning":
             if last_price > (last_vwap * 1.05): future_pred = "VWAP REV DOWN"
@@ -172,14 +253,18 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         anomaly_status = "Clear"
         if total_candles >= 15:
             if len(p_t) >= 2 and len(ind_vals) >= 2:
-                if p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: anomaly_status = "REG_BULL"
+                if p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: 
+                    anomaly_status = "REG_BULL"
+                    c_score += 1
             if len(p_p) >= 2 and len(ind_vals) >= 2:
-                if p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: anomaly_status = "REG_BEAR"
+                if p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: 
+                    anomaly_status = "REG_BEAR"
+                    c_score -= 1
                 
-        return structure_trend, squeeze_status, order_flow, anomaly_status, future_pred, last_price
+        return structure_trend, squeeze_status, order_flow, anomaly_status, future_pred, last_price, c_score
     except Exception as e:
         logging.error(f"Error inside predictive quant engine: {e}")
-        return "Error", "Error", "Error", "Error", "Error", 0.0
+        return "Error", "Error", "Error", "Error", "Error", 0.0, 0
 
 # Startup Signal Function
 async def send_startup_message(application: Application):
@@ -188,7 +273,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>TREND-MATRIX QUANT TERMINAL ONLINE</b>\nMulti-timeframe trend integration completed. HTML formatting loaded. Use /track.",
+                text="🚀 <b>EXHAUSTION PRO QUANT ENGINE TERMINAL ONLINE</b>\nRSI-Trap dynamic protection activated. Orderbook sell-walls filter live. Use /track.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -196,11 +281,11 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ <b>PREDICTIVE TREND TERMINAL V11.0</b>\n\n"
+        "⚡ <b>ALPHA PIVOT EXHAUSTION TERMINAL</b>\n\n"
         "Commands:\n"
-        "/track COIN/USDT - Load pair into structural trend array\n"
+        "/track COIN/USDT - Map pair into trend exhaustion loop\n"
         "/stop COIN/USDT - Unmap tracking vectors\n"
-        "/status - View active dashboard watchlist", 
+        "/status - View dynamic watchlist dashboard", 
         parse_mode="HTML"
     )
 
@@ -212,7 +297,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Mapped <b>{symbol}</b> to Trend Analytics Engine. Streaming cycles configured to 5 minutes.", parse_mode="HTML")
+    await update.message.reply_text(f"✅ Mapped <b>{symbol}</b> to Institutional Exhaustion Matrix. Streaming cycles active at 5m.", parse_mode="HTML")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -220,48 +305,64 @@ async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id in TRACKED_PAIRS and symbol in TRACKED_PAIRS[chat_id]:
         TRACKED_PAIRS[chat_id].remove(symbol)
-        await update.message.reply_text(f"🛑 Unmapped <b>{symbol}</b> from loops.", parse_mode="HTML")
+        await update.message.reply_text(f"🛑 Unmapped <b>{symbol}</b> from terminal core.", parse_mode="HTML")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pairs = TRACKED_PAIRS.get(chat_id, set())
-    if not pairs: await update.message.reply_text("Watchlist array is currently empty.")
+    if not pairs: await update.message.reply_text("Watchlist array is empty.")
     else: 
         watchlist_str = "\n".join([f"• {p}" for p in pairs])
         await update.message.reply_text(f"📋 <b>Active Watchlist:</b>\n{watchlist_str}", parse_mode="HTML")
 
-# Background Monitoring 5-Minute Core Execution Loop
+# Background Monitoring 5-Minute Execution Loop
 async def monitoring_job(application: Application):
     while True:
-        await asyncio.sleep(300) # Strict 5-Minute sleep timer block
+        await asyncio.sleep(300) # Strict 5-Minute loop block
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
             for symbol in list(pairs):
                 timeframe_data = {}
                 last_price = 0.0
                 node_source = "Unknown"
                 has_data = False
+                total_confluence_score = 0
+
+                onchain_intel = scrape_public_onchain_intel(symbol)
 
                 for tf in TIMEFRAMES:
                     try:
                         ohlcv, exchange_obj = fetch_ohlcv_permitted(symbol, tf, limit=150)
                         if ohlcv is None: continue
                         
-                        structure_trend, squeeze, order_flow, anomaly, prediction, price = analyze_predictive_metrics(ohlcv, exchange_obj, symbol)
+                        structure_trend, squeeze, order_flow, anomaly, prediction, price, score = analyze_predictive_metrics(ohlcv, exchange_obj, symbol)
                         if structure_trend == "Error": continue
 
                         last_price = price
                         node_source = exchange_obj.name
+                        total_confluence_score += score
                         timeframe_data[tf] = (squeeze, order_flow, anomaly, prediction, structure_trend)
                         has_data = True
                     except Exception as loop_err: logging.error(f"Processing loop err: {loop_err}")
 
                 if has_data and timeframe_data:
-                    # Determine global header state
-                    is_launch = any("VOL_LAUNCH" in data[3] for data in timeframe_data.values())
-                    header = "⚡ ALERT: MICRO VOLUME VELOCITY BLAST" if is_launch else "🛰️ QUANT PREDICTIVE MATRIX FEED"
+                    if total_confluence_score >= 4: global_bias = "EXTREME_BUY 🚀"
+                    elif total_confluence_score >= 1: global_bias = "MODERATE_BULL 🟢"
+                    elif total_confluence_score <= -4: global_bias = "EXTREME_SHORT 💥"
+                    elif total_confluence_score <= -1: global_bias = "MODERATE_BEAR 🔴"
+                    else: global_bias = "NEUTRAL CONGESTION ⏳"
+                    
+                    # Highlight Top Urgent Warnings
+                    is_exhausted = any("EXHAUST_SHORT_CONFIRM" in data[3] for data in timeframe_data.values())
+                    is_fool_rush = any("FOOL_BULL_RUSH" in data[3] for data in timeframe_data.values())
+                    
+                    if is_exhausted: header = "🚨 COIN EXHAUSTION DETECTED (SAFE TO SHORT)"
+                    elif is_fool_rush: header = "⚠️ FOOLISH BULL RUSH (DO NOT SHORT)"
+                    else: header = "🛰️ QUANT PREDICTIVE MATRIX FEED"
                     
                     msg = f"<b>{header}: {symbol}</b>\n"
                     msg += f"• Price: ${last_price:,.4f}\n"
+                    msg += f"• <b>ON-CHAIN INTEL:</b> <code>{onchain_intel}</code>\n"
+                    msg += f"• <b>NET QUANT SCORE:</b> <code>{total_confluence_score:+} ({global_bias})</code>\n"
                     msg += f"• Execution Node: {node_source}\n"
                     msg += "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
                     msg += "<code>TF    │ TREND     │ SQUEEZE   │ ORDERBOOK        │ FUTURE PRED</code>\n"
@@ -281,16 +382,16 @@ async def monitoring_job(application: Application):
                             msg += f"<code>{tf:<6}│ {structure_trend:<10}│ {squeeze:<10}│ {order_flow:<17}│</code> {display_pred}\n"
                     
                     msg += "───────────────────────────────────────────────────────\n"
-                    msg += "💡 <i>Predictive Key: STRG_BULL/BEAR flags mechanical macro trend state. VOL_LAUNCH marks fast flow spikes.</i>"
+                    msg += "💡 <i>Predictive Key: EXHAUST_SHORT filters false tops using Orderbook walls & volume decay. Do not fight FOOL_BULL_RUSH.</i>"
                     
                     try:
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
-                    except Exception as send_err: logging.error(f"Telegram HTML matrix dispatch fail: {send_err}")
+                    except Exception as send_err: logging.error(f"Telegram HTML alpha matrix dispatch fail: {send_err}")
 
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Trend Core Matrix System Live", 200
+def health_check(): return "Anti Liquidation Engine Live", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
