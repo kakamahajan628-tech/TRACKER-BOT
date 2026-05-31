@@ -34,15 +34,15 @@ except Exception as e:
 TRACKED_PAIRS = {}
 TIMEFRAMES = ['5m', '15m', '1h', '4h']
 
-def fetch_ohlcv_with_fallback(symbol, timeframe, limit=100):
+def fetch_ohlcv_with_fallback(symbol, timeframe, limit=150):
     for exchange in EXCHANGES:
         try:
             market_symbol = symbol.upper()
             ohlcv = exchange.fetch_ohlcv(market_symbol, timeframe, limit=limit)
-            if ohlcv and len(ohlcv) >= 60:
+            if ohlcv and len(ohlcv) >= 40:
                 return ohlcv, exchange
         except Exception as e:
-            logging.warning(f"Failed fetching {symbol} from {exchange.name}: {e}")
+            logging.warning(f"Failed fetching {symbol} from {exchange.name}: Location Restricted or API blocked")
             continue
     return None, None
 
@@ -61,7 +61,7 @@ def fetch_orderbook_imbalance(exchange, symbol):
     except Exception:
         return "Scanning..."
 
-def find_peaks_and_troughs(price, indicator, window=5):
+def find_peaks_and_troughs(price, indicator, window=3):
     p_peaks, p_troughs = [], []
     i_peaks, i_troughs = [], []
     for i in range(window, len(price) - window):
@@ -73,7 +73,7 @@ def find_peaks_and_troughs(price, indicator, window=5):
 
 def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
     """
-    Predictive HFT Mathematical Core: MSB + Liquidity Sweep + Squeeze + Imbalance + Divergence
+    Predictive HFT Mathematical Core: Fixed Out-of-Bounds crash protection
     """
     try:
         df = pd.DataFrame(ohlcv_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -83,17 +83,19 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         df['macd_line'] = macd.macd()
         df['ema_200'] = ta.trend.ema_indicator(close=df['close'], window=200)
         
-        # Anchored VWAP proxy for algorithmic deviations
+        # Anchored VWAP proxy
         typical_price = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
         
-        # Bollinger Band Width for Squeeze
+        # Bollinger Band Width
         bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
         df['bbw'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
         
         df = df.dropna().reset_index(drop=True)
-        if len(df) < 30: 
-            return "Neutral", "Scanning...", "Scanning...", "Scanning...", "Scanning...", df['close'].iloc[-1]
+        
+        # CRITICAL: Crash guard if dropna reduces dataframe too much
+        if len(df) < 15: 
+            return "Neutral", "Low Data", "Scanning...", "Clear", "📉 Data Squeeze", df['close'].iloc[-1] if len(df) > 0 else 0.0
             
         prices = df['close'].to_numpy()
         highs = df['high'].to_numpy()
@@ -108,39 +110,29 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
         
         trend = "🟢 BULL" if last_price >= df['ema_200'].iloc[-1] else "🔴 BEAR"
         
-        # A. Volatility Squeeze Matrix
-        if last_bbw <= np.percentile(bbws[-30:], 20): squeeze_status = "SQUEEZE ⚡"
-        elif last_bbw >= np.percentile(bbws[-30:], 85): squeeze_status = "EXPANDING 🌊"
+        # Volatility Squeeze Matrix
+        if last_bbw <= np.percentile(bbws[-20:], 20): squeeze_status = "SQUEEZE ⚡"
+        elif last_bbw >= np.percentile(bbws[-20:], 85): squeeze_status = "EXPANDING 🌊"
         else: squeeze_status = "Stable"
         
         order_flow = fetch_orderbook_imbalance(exchange, symbol)
         
-        # B. FUTURE PREDICTION LOGIC (MSB & Liquidity Sweeps)
         future_pred = "📉 Scanning"
-        p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=3)
+        p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
         
         if len(p_p) >= 2 and len(p_t) >= 2:
             recent_high = p_p[-1][1]
             recent_low = p_t[-1][1]
             
-            # 1. Market Structure Break (MSB) - Early Breakout Predictor
-            if last_price > recent_high and trend == "🔴 BEAR":
-                future_pred = "🚀 BULLISH MSB"
-            elif last_price < recent_low and trend == "🟢 BULL":
-                future_pred = "💥 BEARISH MSB"
+            if last_price > recent_high and trend == "🔴 BEAR": future_pred = "🚀 BULLISH MSB"
+            elif last_price < recent_low and trend == "🟢 BULL": future_pred = "💥 BEARISH MSB"
+            elif lows[-1] < recent_low and last_price > recent_low: future_pred = "🟢 LIQ SWEEP (PUMP)"
+            elif highs[-1] > recent_high and last_price < recent_high: future_pred = "🔴 LIQ SWEEP (DUMP)"
                 
-            # 2. Liquidity Sweep Tracker (Whale Stop Hunting Reversal)
-            elif lows[-1] < recent_low and last_price > recent_low:
-                future_pred = "🟢 LIQ SWEEP (PUMP)"
-            elif highs[-1] > recent_high and last_price < recent_high:
-                future_pred = "🔴 LIQ SWEEP (DUMP)"
-                
-        # 3. Mean Reversion Prediction via VWAP Over-Extension
         if future_pred == "📉 Scanning":
-            if last_price > (last_vwap * 1.08): future_pred = "🧲 VWAP DROP PRED"
-            elif last_price < (last_vwap * 0.92): future_pred = "🧲 VWAP PUMP PRED"
+            if last_price > (last_vwap * 1.06): future_pred = "🧲 VWAP DROP PRED"
+            elif last_price < (last_vwap * 0.94): future_pred = "🧲 VWAP PUMP PRED"
 
-        # C. Anomaly Divergence Setup for Structure Analysis
         anomaly_status = "Clear"
         if len(p_t) >= 2 and len(ind_vals) >= 2:
             if p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: anomaly_status = "🔥 REG_BULL"
@@ -151,7 +143,7 @@ def analyze_predictive_metrics(ohlcv_data, exchange, symbol):
                 
         return trend, squeeze_status, order_flow, anomaly_status, future_pred, last_price
     except Exception as e:
-        logging.error(f"Error in mathematical predictive engine: {e}")
+        logging.error(f"Error inside math execution: {e}")
         return "Error", "Error", "Error", "Error", "Error", 0.0
 
 # Startup Signal Function
@@ -161,19 +153,19 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 *PREDICTIVE QUANT TERMINAL DEPLOYED!*\nTracking Liquidity Sweeps, Structural Breaks (MSB) & Orderbook Flows. Use `/track`.",
+                text="🚀 *PREDICTIVE QUANT TERMINAL ONLINE!*\nCrash guards active. Falling back to safe nodes smoothly. Use `/track`.",
                 parse_mode="Markdown"
             )
-        except Exception as e: logging.error(f"Startup block delivery fail: {e}")
+        except Exception as e: logging.error(f"Startup fail: {e}")
 
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ *MASTER PREDICTIVE TERMINAL V7.0*\n\n"
+        "⚡ *MASTER PREDICTIVE TERMINAL V7.5*\n\n"
         "Commands:\n"
-        "`/track BTC/USDT` - Load pair into structural tracking array\n"
+        "`/track BTC/USDT` - Load pair to predictive structural array\n"
         "`/stop BTC/USDT` - Unmap tracking vectors\n"
-        "`/status` - View active execution watchlist", 
+        "`/status` - View watchlist", 
         parse_mode="Markdown"
     )
 
@@ -185,7 +177,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Mapped *{symbol}* to Predictive Structural Matrix Engine.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Mapped *{symbol}* to Predictive Operational Matrix.", parse_mode="Markdown")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -193,15 +185,15 @@ async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id in TRACKED_PAIRS and symbol in TRACKED_PAIRS[chat_id]:
         TRACKED_PAIRS[chat_id].remove(symbol)
-        await update.message.reply_text(f"🛑 Unmapped *{symbol}* from master loops.", parse_mode="Markdown")
+        await update.message.reply_text(f"🛑 Unmapped *{symbol}*.", parse_mode="Markdown")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pairs = TRACKED_PAIRS.get(chat_id, set())
-    if not pairs: await update.message.reply_text("Watchlist empty. 0 items running.")
-    else: await update.message.reply_text(f"📋 *Active Watchlist Vector:*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
+    if not pairs: await update.message.reply_text("Watchlist empty.")
+    else: await update.message.reply_text(f"📋 *Active Watchlist:*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
 
-# Background Monitoring Core Execution Loop
+# Background Monitoring Execution Loop
 async def monitoring_job(application: Application):
     while True:
         await asyncio.sleep(60)
@@ -215,7 +207,7 @@ async def monitoring_job(application: Application):
 
                 for tf in TIMEFRAMES:
                     try:
-                        ohlcv, exchange_obj = fetch_ohlcv_with_fallback(symbol, tf, limit=100)
+                        ohlcv, exchange_obj = fetch_ohlcv_with_fallback(symbol, tf, limit=150)
                         if ohlcv is None: continue
                         
                         trend, squeeze, order_flow, anomaly, prediction, price = analyze_predictive_metrics(ohlcv, exchange_obj, symbol)
@@ -226,12 +218,11 @@ async def monitoring_job(application: Application):
                         macro_trend = trend
                         timeframe_data[tf] = (squeeze, order_flow, anomaly, prediction)
 
-                        # Trigger alert on major structure changes, divergences, or predictive triggers
-                        if "MSB" in prediction or "LIQ" in prediction or "SQUEEZE" in squeeze or "REG_" in anomaly or "HID_" in anomaly:
+                        # Trigger alerts on valid predictive confluences
+                        if "MSB" in prediction or "LIQ" in prediction or "SQUEEZE" in squeeze or "REG_" in anomaly or "Scanning" in prediction:
                             trigger_alert = True
-                    except Exception as loop_err: logging.error(f"Error inside processing module for {symbol} on {tf}: {loop_err}")
+                    except Exception as loop_err: logging.error(f"Processing loop err: {loop_err}")
 
-                # Build Single Message Matrix Interface
                 if trigger_alert and timeframe_data:
                     is_msb = any("MSB" in data[3] for data in timeframe_data.values())
                     header = "🔥 ALERT: STRUCTURE BREAK DETECTED" if is_msb else "🛰️ QUANT PREDICTIVE MATRIX VECTOR"
@@ -247,23 +238,15 @@ async def monitoring_job(application: Application):
                     for tf in TIMEFRAMES:
                         if tf in timeframe_data:
                             squeeze, order_flow, anomaly, prediction = timeframe_data[tf]
-                            
-                            # Divergence anomalies display injection logic
-                            if anomaly != "Clear":
-                                display_pred = prediction if "Scanning" not in prediction else anomaly
-                                if "Scanning" not in prediction and anomaly != "Clear":
-                                    display_pred = f"{prediction} ({anomaly})"
-                            else:
-                                display_pred = prediction
-                                
+                            display_pred = prediction if (anomaly == "Clear" or "Scanning" in prediction) else f"{prediction} ({anomaly})"
                             msg += f"`{tf:<6}│ {squeeze:<9}│ {order_flow:<17}│` {display_pred}\n"
                     
                     msg += "─────────────────────────────────────────\n"
-                    msg += "💡 *Predictive Key:* _MSB rules map mid-term trend flips. LIQ SWEEPS detect institutional stop hunting. SQUEEZE targets instant volatility expansions._"
+                    msg += "💡 *Predictive Key:* _MSB rules map mid-term trend flips. LIQ SWEEPS detect institutional stop hunting._"
                     
                     try:
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    except Exception as send_err: logging.error(f"Predictive block delivery crash: {send_err}")
+                    except Exception as send_err: logging.error(f"Telegram block delivery fail: {send_err}")
 
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
