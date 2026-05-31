@@ -71,9 +71,9 @@ def fetch_orderbook_advanced_metrics(exchange, symbol):
         else:
             spread_pct = 0.0
             
-        if spread_pct >= 0.25: return bid_ratio, "RISK_VOID"
-        if bid_ratio >= 65: return bid_ratio, f"{bid_ratio:.0f}% BUYER"
-        elif bid_ratio <= 35: return bid_ratio, f"{(100 - bid_ratio):.0f}% SELLER"
+        if spread_pct >= 0.25: return bid_ratio, "KHATRA_GAP"
+        if bid_ratio >= 65: return bid_ratio, f"{bid_ratio:.0f}%BUYER"
+        elif bid_ratio <= 35: return bid_ratio, f"{(100 - bid_ratio):.0f}%SELLER"
         return bid_ratio, "NORMAL"
     except Exception:
         return 50.0, "SCANNING"
@@ -95,10 +95,10 @@ def scrape_public_onchain_intel(symbol):
             
             if vol_24h > 0 and mcap > 0:
                 v2m_ratio = vol_24h / mcap
-                if price_change < -10 and v2m_ratio > 0.35: return "WHALE_BUYING_HIDDEN"
-                elif v2m_ratio > 0.40: return "WHALES_ACCUMULATING"
-                elif v2m_ratio > 0.20: return "ACTIVE_VOLUME_FLOW"
-        return "HOLDERS_STABLE"
+                if price_change < -10 and v2m_ratio > 0.35: return "WHALE_CHUPCHAP_BUY"
+                elif v2m_ratio > 0.40: return "WHALE_MAL_IKATHA_KR_RHI"
+                elif v2m_ratio > 0.20: return "HEAVY_VOLUME_FLOW"
+        return "STABLE_HOLDERS"
     except Exception:
         return "ROUTING"
 
@@ -168,14 +168,14 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
         
         p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
         
-        # Super Simple Latin Hindi Trend Translation Matrix
+        # Pure Hinglish Trend Output
         structure_trend = "NORMAL"
         if total_candles <= 25:
             if last_price > last_ema50: 
-                structure_trend = "UP_MICR"
+                structure_trend = "UP_CHOTA"
                 c_score += 1
             elif last_price < last_ema50: 
-                structure_trend = "DN_MICR"
+                structure_trend = "DN_CHOTA"
                 c_score -= 1
         else:
             if len(p_p) >= 2 and len(p_t) >= 2:
@@ -185,31 +185,31 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
                 lower_low = p_t[-1][1] < p_t[-2][1]
                 
                 if higher_high and higher_low and last_price > last_ema200: 
-                    structure_trend = "UP_STRG"
+                    structure_trend = "TEZ_UP"
                     c_score += 2
                 elif lower_high and lower_low and last_price < last_ema200: 
-                    structure_trend = "DN_STRG"
+                    structure_trend = "TEZ_DOWN"
                     c_score -= 2
                 elif last_price > last_ema200: 
-                    structure_trend = "UP_WEAK"
+                    structure_trend = "UP_HALKA"
                     c_score += 1
                 elif last_price < last_ema200: 
-                    structure_trend = "DN_WEAK"
+                    structure_trend = "DN_HALKA"
                     c_score -= 1
             else:
                 if last_price >= last_ema200: 
-                    structure_trend = "UP"
+                    structure_trend = "TEJI"
                     c_score += 1
                 else: 
-                    structure_trend = "DOWN"
+                    structure_trend = "MANDI"
                     c_score -= 1
 
-        squeeze_status = "STABLE"
+        squeeze_status = "SHANT"
         if total_candles >= 20 and len(bbws) >= 20:
-            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "BLST_IN"
-            elif bbws[-1] >= np.percentile(bbws[-20:], 85): squeeze_status = "RUNNING"
+            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "BADA_MOVE"
+            elif bbws[-1] >= np.percentile(bbws[-20:], 85): squeeze_status = "BHAAG_RHA"
         else:
-            squeeze_status = "NEW_COIN"
+            squeeze_status = "NAYA_COIN"
             
         if "BUYER" in order_flow_status: c_score += 1
         elif "SELLER" in order_flow_status: c_score -= 1
@@ -223,31 +223,31 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             is_delta_divergent = last_delta < 0
             is_velocity_decaying = len(rsis) >= 3 and (rsis[-1] - rsis[-2]) < (rsis[-2] - rsis[-3])
             
-            if order_flow_status == "RISK_VOID":
-                future_pred = "🎰 DANGEROUS_GAP"
+            if order_flow_status == "KHATRA_GAP":
+                future_pred = "🎰 VOID_TRAP_MATH"
                 c_score -= 3
             elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked and is_delta_divergent and is_velocity_decaying:
-                future_pred = "🎯 QUANT_TOP_SHORT"
+                future_pred = "🎯 SHORT_THOKO_ABHI"
                 c_score -= 5
             elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked:
-                future_pred = "🚨 EXHAUST_SHORT"
+                future_pred = "🚨 DUM_KHTM_SHORT"
                 c_score -= 3
             elif last_vol > (last_vol_ma * 2.5) and last_delta > 0:
-                future_pred = "⚠️ FOOL_RUSH_RUN"
+                future_pred = "⚠️ FAKE_PUMP_MAT_SHORT"
                 c_score += 2
             else:
-                future_pred = "⏳ RSI_SPEED_WAIT"
+                future_pred = "⏳ RUKO_SET_HONE_DO"
         else:
             if total_candles <= 25:
                 if last_vol > (last_vol_ma * 3.0):
                     if last_price >= prices[-2]: 
-                        future_pred = "VOLUME_PUMP"
+                        future_pred = "VOLUME_PUMP_AAYA"
                         c_score += 2
                     else: 
-                        future_pred = "VOLUME_DUMP"
+                        future_pred = "VOLUME_DUMP_AAYA"
                         c_score -= 2
                 elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2:
-                    future_pred = "WHALE_DISTRIBUTION"
+                    future_pred = "WHALE_MAL_BECH_RHI"
                     c_score -= 1
             else:
                 if len(p_p) >= 2 and len(p_t) >= 2:
@@ -255,37 +255,37 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
                     recent_low = p_t[-1][1]
                     
                     if last_price > recent_high and bid_pct <= 35:
-                        future_pred = "BREAKOUT_TRAP_SHORT"
+                        future_pred = "TRAP_HA_SHORT_KRO"
                         c_score -= 2
                     elif last_price < recent_low and bid_pct >= 65:
-                        future_pred = "BREAKOUT_TRAP_LONG"
+                        future_pred = "TRAP_HA_LONG_KRO"
                         c_score += 2
-                    elif last_price > recent_high and "BEAR" in structure_trend: 
-                        future_pred = "TREND_REVERSAL_UP"
+                    elif last_price > recent_high and "MANDI" in structure_trend: 
+                        future_pred = "TREND_PALTA_UP"
                         c_score += 2
-                    elif last_price < recent_low and "BULL" in structure_trend: 
-                        future_pred = "TREND_REVERSAL_DN"
+                    elif last_price < recent_low and "TEJI" in structure_trend: 
+                        future_pred = "TREND_PALTA_DN"
                         c_score -= 2
                     elif lows[-1] < recent_low and last_price > recent_low: 
-                        future_pred = "LIQUIDATION_HUNT_UP"
+                        future_pred = "STOP_HUNT_PUMP"
                         c_score += 2
                     elif highs[-1] > recent_high and last_price < recent_high: 
-                        future_pred = "LIQUIDATION_HUNT_DN"
+                        future_pred = "STOP_HUNT_DUMP"
                         c_score -= 2
 
         if future_pred == "SCANNING":
-            if last_price > (last_vwap * 1.05): future_pred = "PRICE_TOO_HIGH"
-            elif last_price < (last_vwap * 0.95): future_pred = "PRICE_TOO_LOW"
+            if last_price > (last_vwap * 1.05): future_pred = "BHUT_UPAR_AGYA"
+            elif last_price < (last_vwap * 0.95): future_pred = "BHUT_NICHE_AGYA"
 
         anomaly_status = "Clear"
         if total_candles >= 15:
             if len(p_t) >= 2 and len(ind_vals) >= 2:
                 if p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: 
-                    anomaly_status = "BULL_DIVERGENCE"
+                    anomaly_status = "CHUPI_BUY_DIVERG"
                     c_score += 1
             if len(p_p) >= 2 and len(ind_vals) >= 2:
                 if p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: 
-                    anomaly_status = "BEAR_DIVERGENCE"
+                    anomaly_status = "CHUPI_SELL_DIVERG"
                     c_score -= 1
                 
         return structure_trend, squeeze_status, anomaly_status, future_pred, last_price, c_score
@@ -300,7 +300,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>SIMPLE TERMS QUANT TERMINAL ONLINE</b>\nMobile-Safe friendly layout with clear words deployed. Use /track.",
+                text="🚀 <b>HINGLISH TERMINAL SYSTEM ONLINE</b>\nAb saari reports ekdum aasan Hinglish words mein aayengi bhai. Use /track.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -308,23 +308,23 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ <b>SIMPLE PREDICTIVE TERMINAL</b>\n\n"
+        "⚡ <b>HINGLISH SAFE QUANT TERMINAL</b>\n\n"
         "Commands:\n"
-        "/track COIN/USDT - Map pair into matrix loop\n"
-        "/stop COIN/USDT - Unmap tracking vectors\n"
-        "/status - View dynamic watchlist dashboard", 
+        "/track COIN/USDT - Coin ko list mein add karein\n"
+        "/stop COIN/USDT - Coin ko list se hatayein\n"
+        "/status - Apni watchlist check karein", 
         parse_mode="HTML"
     )
 
 async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("❌ Specify asset pair matrix. Ex: /track SOL/USDT")
+        await update.message.reply_text("❌ Coin ka naam dalo. Ex: /track SOL/USDT")
         return
     symbol = context.args[0].upper()
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Mapped <b>{symbol}</b> to Compact Loop. Next update in 5 minutes.", parse_mode="HTML")
+    await update.message.reply_text(f"✅ <b>{symbol}</b> load ho gaya hai bhai. Har 5 minute mein automatic report aayegi.", parse_mode="HTML")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -332,12 +332,12 @@ async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id in TRACKED_PAIRS and symbol in TRACKED_PAIRS[chat_id]:
         TRACKED_PAIRS[chat_id].remove(symbol)
-        await update.message.reply_text(f"🛑 Unmapped <b>{symbol}</b> from core.", parse_mode="HTML")
+        await update.message.reply_text(f"🛑 <b>{symbol}</b> ko list se hata diya hai.", parse_mode="HTML")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     pairs = TRACKED_PAIRS.get(chat_id, set())
-    if not pairs: await update.message.reply_text("Watchlist array is empty.")
+    if not pairs: await update.message.reply_text("Watchlist abhi khali hai bhai.")
     else: 
         watchlist_str = "\n".join([f"• {p}" for p in pairs])
         await update.message.reply_text(f"📋 <b>Active Watchlist:</b>\n{watchlist_str}", parse_mode="HTML")
@@ -345,7 +345,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Background Monitoring 5-Minute Execution Loop
 async def monitoring_job(application: Application):
     while True:
-        await asyncio.sleep(300) # Strict 5-Minute loop block
+        await asyncio.sleep(300) # Pure 5-Minute loop block
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
             for symbol in list(pairs):
                 timeframe_data = {}
@@ -375,28 +375,28 @@ async def monitoring_job(application: Application):
                     except Exception as loop_err: logging.error(f"Processing loop err: {loop_err}")
 
                 if has_data and timeframe_data:
-                    if total_confluence_score >= 5: global_bias = "EXTREME_BUY 🚀"
-                    elif total_confluence_score >= 1: global_bias = "MOD_BUY 🟢"
-                    elif total_confluence_score <= -5: global_bias = "EXTREME_SHORT 💥"
-                    elif total_confluence_score <= -1: global_bias = "MOD_SHORT 🔴"
-                    else: global_bias = "NEUTRAL ⏳"
+                    if total_confluence_score >= 5: global_bias = "POORA_TEZ_BUY 🚀"
+                    elif total_confluence_score >= 1: global_bias = "UP_RUKH 🟢"
+                    elif total_confluence_score <= -5: global_bias = "POORA_MANDI_SHORT 💥"
+                    elif total_confluence_score <= -1: global_bias = "DN_RUKH 🔴"
+                    else: global_bias = "SIDEWAYS ⏳"
                     
-                    is_quant_top = any("QUANT_TOP_SHORT" in data[3] for data in timeframe_data.values())
-                    is_void = any("DANGEROUS_GAP" in data[3] for data in timeframe_data.values())
-                    is_fool_rush = any("FOOL_RUSH" in data[3] for data in timeframe_data.values())
+                    is_quant_top = any("SHORT_THOKO_ABHI" in data[3] for data in timeframe_data.values())
+                    is_void = any("KHATRA_GAP" in data[1] for data in timeframe_data.values())
+                    is_fool_rush = any("FAKE_PUMP" in data[3] for data in timeframe_data.values())
                     
-                    if is_quant_top: header = "🎯 QUANT SNIPER: HIGH PROBABILITY TOP"
-                    elif is_void: header = "🎰 SPREAD VOID: LIQUIDITY CRASH RISK"
-                    elif is_fool_rush: header = "⚠️ WARNING: FOOLISH RUSH ACTIVE"
-                    else: header = "🛰️ QUANT PREDICTIVE MATRIX FEED"
+                    if is_quant_top: header = "🎯🎯 ALFA TRIGGER: SHORT THOKO ABHI"
+                    elif is_void: header = "🎰 WARNING: ORDERBOOK KHALI HA (VOID)"
+                    elif is_fool_rush: header = "⚠️ DOOR RAHO: FAKE UP RUSH ACTIVE"
+                    else: header = "🛰️ LIVE QUANT MATRIX REPORT"
                     
-                    # Ultra-Clean, Non-wrapping layout configuration
+                    # Mobile Clean Grid Formatter
                     msg = f"<b>{header}: {symbol}</b>\n"
                     msg += f"• Price: ${last_price:,.4f} ({node_source})\n"
-                    msg += f"• Intel: <code>{onchain_intel}</code>\n"
-                    msg += f"• Quant Score: <code>{total_confluence_score:+} ({global_bias})</code>\n"
+                    msg += f"• Whales Intel: <code>{onchain_intel}</code>\n"
+                    msg += f"• Net Score: <code>{total_confluence_score:+} ({global_bias})</code>\n"
                     msg += "====================================\n"
-                    msg += "<code>TF  │TREND   │SQZ │OB_BOOK  │PREDICTION</code>\n"
+                    msg += "<code>TF  │TREND   │MOVE│ORDERBK  │FORECAST</code>\n"
                     msg += "------------------------------------\n"
                     
                     for tf in TIMEFRAMES:
@@ -410,7 +410,7 @@ async def monitoring_job(application: Application):
                             msg += f"<code>{tf:<4}│{structure_trend:<8}│{squeeze:<4}│{order_flow_status:<9}│</code>{short_pred}\n"
                     
                     msg += "====================================\n"
-                    msg += "💡 <i>Keys: UP/DN_STRG (Strong Trend), UP/DN_MICR (Micro Trend). BLST_IN (Blast Coming). QUANT_TOP_SHORT is the main entry trigger.</i>"
+                    msg += "💡 <i>Short Guide: Jab top par SHORT_THOKO_ABHI likha aaye aur Score heavy negative ho, tabhi entry banani hai bhai.</i>"
                     
                     try:
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
@@ -419,7 +419,7 @@ async def monitoring_job(application: Application):
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Simple Terms Quant Core Operational", 200
+def health_check(): return "Hinglish Quant Core Alive", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
