@@ -143,7 +143,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 *PREDICTIVE QUANT TERMINAL ONLINE!*\nPermitted Exchange Framework Live. Ready to monitor loops. Use `/track`.",
+                text="🚀 *PREDICTIVE QUANT TERMINAL ONLINE!*\nContinuous matrix feed set to 5-minute intervals. Use `/track`.",
                 parse_mode="Markdown"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -151,7 +151,7 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ *PREDICTIVE COIL TERMINAL V8.5*\n\n"
+        "⚡ *PREDICTIVE COIL TERMINAL V9.5*\n\n"
         "Commands:\n"
         "`/track BTC/USDT` - Map asset matrix to real-time loops\n"
         "`/stop BTC/USDT` - Unmap tracking vectors\n"
@@ -167,7 +167,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbol = context.args[0].upper()
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Mapped *{symbol}* to Permitted Predictive Matrix.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Mapped *{symbol}* to 5-Minute Continuous Matrix Loop. Updates streaming soon.", parse_mode="Markdown")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -183,17 +183,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pairs: await update.message.reply_text("Watchlist empty.")
     else: await update.message.reply_text(f"📋 *Active Watchlist (Permitted Nodes):*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
 
-# Background Monitoring Loop
+# Background Monitoring Loop (MODIFIED: Runs strictly every 5 minutes / 300 seconds)
 async def monitoring_job(application: Application):
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(300) # 5 minutes interval delay loop
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
             for symbol in list(pairs):
                 timeframe_data = {}
-                trigger_alert = False
                 last_price = 0.0
                 node_source = "Unknown"
                 macro_trend = "Unknown"
+                has_data = False
 
                 for tf in TIMEFRAMES:
                     try:
@@ -207,14 +207,12 @@ async def monitoring_job(application: Application):
                         node_source = exchange_obj.name
                         macro_trend = trend
                         timeframe_data[tf] = (squeeze, order_flow, anomaly, prediction)
-
-                        if "MSB" in prediction or "LIQ" in prediction or "SQUEEZE" in squeeze or "REG_" in anomaly or "HID_" in anomaly or "Scanning" in prediction:
-                            trigger_alert = True
+                        has_data = True
                     except Exception as loop_err: logging.error(f"Processing loop err: {loop_err}")
 
-                if trigger_alert and timeframe_data:
+                if has_data and timeframe_data:
                     is_msb = any("MSB" in data[3] for data in timeframe_data.values())
-                    header = "🔥 ALERT: STRUCTURE BREAK DETECTED" if is_msb else "🛰️ QUANT PREDICTIVE MATRIX VECTOR"
+                    header = "🔥 ALERT: STRUCTURE BREAK DETECTED" if is_msb else "🛰️ QUANT PREDICTIVE LIVE MATRIX"
                     
                     msg = f"*{header}: {symbol}*\n"
                     msg += f"• *Price:* ${last_price:,.4f}\n"
@@ -247,7 +245,7 @@ async def monitoring_job(application: Application):
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Permitted Analytical Engine Live", 200
+def health_check(): return "Continuous 5-Minute Quant Feed Active", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
