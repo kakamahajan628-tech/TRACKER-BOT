@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from threading import Thread
 from flask import Flask
 
-# Logging setup to track tasks on Render console
+# Logging setup
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -171,7 +171,6 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             is_rsi_hooked = len(rsis) >= 2 and rsis[-1] < rsis[-2]
             is_delta_divergent = last_delta < 0
             is_velocity_decaying = len(rsis) >= 3 and (rsis[-1] - rsis[-2]) < (rsis[-2] - rsis[-3])
-            
             is_whale_trap = total_candles >= 2 and highs[-1] > highs[-2] and prices[-1] < prices[-2]
             
             if order_flow_status == "LIMIT_GAP": future_pred, c_score = "VOID_TRAP", c_score - 3
@@ -215,7 +214,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT TERMINAL v19.0 DISPATCHED</b>\nParallel scanner ready. Deletion error fixed permanently. Open menu with /panel.",
+                text="🚀 <b>QUANT TERMINAL v19.5 RESPONSE FIX LIVE</b>\nButtons responses optimized with interactive instant popup text. Use /panel.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -248,24 +247,30 @@ async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
+# 🚀 INTERACTIVE BUTTON CALLBACK TRIGGERS (Added Alert Popup Response)
 async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     chat_id = query.message.chat_id
     data = query.data
-    await query.answer()
 
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
 
     if data == "add_coin_click":
+        await query.answer() # Simple click answer acknowledge
         WAITING_FOR_COIN[chat_id] = True
-        await query.message.reply_text("📝 Jis pair ko track karna hai uska naam bhejo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
+        await context.bot.send_message(chat_id=chat_id, text="📝 Jis pair ko track karna hai uska naam bhejo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
     elif data.startswith("stop_"):
         symbol = data.replace("stop_", "")
+        await query.answer(text=f"🛑 {symbol} ko pipeline se hata diya!", show_alert=False) # Instant popup indicator
         if symbol in TRACKED_PAIRS[chat_id]:
             TRACKED_PAIRS[chat_id].remove(symbol)
             if symbol in SENT_ALERTS.get(chat_id, {}): del SENT_ALERTS[chat_id][symbol]
             if symbol in COOLDOWN_MEMORY.get(chat_id, {}): del COOLDOWN_MEMORY[chat_id][symbol]
-            await query.message.reply_text(f"🛑 <b>{symbol}</b> pipeline se hat gaya.", parse_mode="HTML")
+            await context.bot.send_message(chat_id=chat_id, text=f"🛑 <b>{symbol}</b> scanning se hat gaya.", parse_mode="HTML")
+    elif data.startswith("view_"):
+        symbol = data.replace("view_", "")
+        # 👑 INSTANT TEXT POPUP NOTIFICATION: Clears the confusion of "no response"
+        await query.answer(text=f"🔍 Bhai {symbol} active hai! Har 5 min me report khud chal ke aayegi.", show_alert=True)
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -279,18 +284,16 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TRACKED_PAIRS[chat_id].add(text_received)
         WAITING_FOR_COIN[chat_id] = False
         await update.message.reply_text(
-            f"✅ <b>{text_received}</b> successfully list mein add ho gaya!",
+            f"✅ <b>{text_received}</b> successfully list mein add ho gaya! Piche loop active hai, pehla quantitative analysis 5 minute me drop hoga.",
             reply_markup=build_control_panel(chat_id),
             parse_mode="HTML"
         )
 
-# 🚀 COIN-SPECIFIC PARALLEL PIPELINE WORKER BLOCK
+# Pipeline concurrent processing function block
 async def process_single_coin_pipeline(application, chat_id, symbol, loop_count):
     try:
-        await asyncio.sleep(0.05) # Rate limiting anti-ban guard
-        
-        if COOLDOWN_MEMORY.get(chat_id, {}).get(symbol, 0) > loop_count:
-            return
+        await asyncio.sleep(0.05)
+        if COOLDOWN_MEMORY.get(chat_id, {}).get(symbol, 0) > loop_count: return
 
         timeframe_data = {}
         last_price, node_source, has_data, total_confluence_score = 0.0, "Unknown", False, 0
@@ -309,7 +312,6 @@ async def process_single_coin_pipeline(application, chat_id, symbol, loop_count)
             timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend)
             has_data = True
             
-            # Realtime Sniper Trigger Block
             if tf == "5m" and (prediction == "SHORT_THOKO" or prediction == "WHALE_TRAP"):
                 if chat_id not in SENT_ALERTS: SENT_ALERTS[chat_id] = {}
                 if SENT_ALERTS[chat_id].get(symbol) != last_price:
@@ -321,7 +323,7 @@ async def process_single_coin_pipeline(application, chat_id, symbol, loop_count)
                     try: 
                         await application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML")
                         SENT_ALERTS[chat_id][symbol] = last_price
-                        COOLDOWN_MEMORY[chat_id][symbol] = loop_count + 6 # 30 min lock active
+                        COOLDOWN_MEMORY[chat_id][symbol] = loop_count + 6
                     except Exception: pass
 
         if has_data and timeframe_data:
@@ -359,12 +361,9 @@ async def process_single_coin_pipeline(application, chat_id, symbol, loop_count)
                     
             msg += "==================================\n"
             msg += "💡 <i>Short Guide: Jab main header par WHALE_TRAP ya SHORT_THOKO dikhe, tabhi short thoko bhai.</i>"
-            
-            try:
-                await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+            try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
             except Exception: pass
-    except Exception as e:
-        logging.error(f"Worker task error for {symbol}: {e}")
+    except Exception: pass
 
 async def monitoring_job(application: Application):
     loop_count = 0
