@@ -12,7 +12,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQuer
 from threading import Thread
 from flask import Flask
 
-# Logging activation
+# Heavy logging activation
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -27,9 +27,9 @@ EXCHANGES = []
 try:
     EXCHANGES.append(ccxt.gateio({'enableRateLimit': True}))
     EXCHANGES.append(ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}))
-    logging.info("Exchanges fully synced.")
+    logging.info("Permitted exchange nodes mapped successfully.")
 except Exception as e:
-    logging.error(f"Exchange node boot failed: {e}")
+    logging.error(f"Exchange system node sync crash: {e}")
 
 TRACKED_PAIRS = {}
 TIMEFRAMES = ['5m', '15m', '1h', '4h']
@@ -158,7 +158,7 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
 
         squeeze_status = "SAB_SHANT"
         if total_candles >= 20 and len(bbws) >= 20:
-            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "BADA_MOVE_AANE_WALA_HAI"
+            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "BADA_MOVE_IN"
             elif bbws[-1] >= np.percentile(bbws[-20:], 85): squeeze_status = "VOLATILE"
         else: squeeze_status = "NAYA_COIN"
             
@@ -171,6 +171,7 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             is_rsi_hooked = len(rsis) >= 2 and rsis[-1] < rsis[-2]
             is_delta_divergent = last_delta < 0
             is_velocity_decaying = len(rsis) >= 3 and (rsis[-1] - rsis[-2]) < (rsis[-2] - rsis[-3])
+            
             is_whale_trap = total_candles >= 2 and highs[-1] > highs[-2] and prices[-1] < prices[-2]
             
             if order_flow_status == "LIMIT_GAP": future_pred, c_score = "VOID_TRAP", c_score - 3
@@ -214,7 +215,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT SNIPER TERMINAL v20.0 LIVE</b>\nPlain text system active. Ab sabkuch aasan bhasa me aayega bina kisi table jhanjhat ke. Use /panel.",
+                text="🚀 <b>QUANT SNIPER TERMINAL v20.0 SUPREME LIVE</b>\nParallel Processing Core fully synced. Anti-collision independent message blocks active. Use /panel.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -268,7 +269,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.send_message(chat_id=chat_id, text=f"🛑 <b>{symbol}</b> scanning framework se hat gaya.", parse_mode="HTML")
     elif data.startswith("view_"):
         symbol = data.replace("view_", "")
-        await query.answer(text=f"🔍 {symbol} active hai! Report har 5 min me automatic chat me mil jayegi.", show_alert=True)
+        await query.answer(text=f"🔍 {symbol} active hai! Har 5 min me automatic clean report khud chal ke aayegi.", show_alert=True)
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -282,15 +283,15 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TRACKED_PAIRS[chat_id].add(text_received)
         WAITING_FOR_COIN[chat_id] = False
         await update.message.reply_text(
-            f"✅ <b>{text_received}</b> list mein add ho gaya bhai! 5 minute me analysis message chal kar aayega.",
+            f"✅ <b>{text_received}</b> concurrent monitoring list mein add ho gaya bhai! 5 minute me automated clean analysis report active ho jayegi.",
             reply_markup=build_control_panel(chat_id),
             parse_mode="HTML"
         )
 
-# Pipeline concurrent processing worker loop
+# 🚀 COIN-SPECIFIC CONCURRENT PIPELINE EXECUTION WORKER
 async def process_single_coin_pipeline(application, chat_id, symbol, loop_count):
     try:
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05) # Rate limit protection block
         if COOLDOWN_MEMORY.get(chat_id, {}).get(symbol, 0) > loop_count: return
 
         timeframe_data = {}
@@ -310,56 +311,57 @@ async def process_single_coin_pipeline(application, chat_id, symbol, loop_count)
             timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend)
             has_data = True
             
-            # Instant Realtime Alerts
+            # Instantaneous HFT Sniper Trigger Network
             if tf == "5m" and (prediction == "SHORT_THOKO" or prediction == "WHALE_TRAP"):
                 if chat_id not in SENT_ALERTS: SENT_ALERTS[chat_id] = {}
                 if SENT_ALERTS[chat_id].get(symbol) != last_price:
-                    alert_type = "WHALE LIQUIDATION TRAP RECOGNIZED" if prediction == "WHALE_TRAP" else "SNIPER TRADING TOP DETECTED"
-                    sniper_msg = f"🎯 <b>{alert_type}: {symbol}</b>\n\n"
-                    sniper_msg += f"Bhai live price ${last_price:,.4f} chal rhi hai.\n"
-                    sniper_msg += f"Orderbook status {order_flow_status} ha.\n\n"
-                    sniper_msg += "Whales ka manipulation poora ho gaya hai, yahan se market orders exhaust ho chuke hain. Safe short entry bana lo!"
+                    alert_type = "🚨 WHALE LIQUIDATION TRAP CONFIRMED" if prediction == "WHALE_TRAP" else "🎯 SNIPER TOP TARGET FOUND"
+                    sniper_msg = f"<b>{alert_type}: {symbol}</b>\n"
+                    sniper_msg += f"• Current Price: ${last_price:,.4f}\n"
+                    sniper_msg += f"• Orderbook Matrix: <code>{order_flow_status}</code>\n\n"
+                    sniper_msg += "🔥 <b>Bhai market orders ka dum poora toot chuka hai, safe extreme sniper top lag gaya! Entry lo!</b>"
                     try: 
                         await application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML")
                         SENT_ALERTS[chat_id][symbol] = last_price
-                        COOLDOWN_MEMORY[chat_id][symbol] = loop_count + 6
+                        COOLDOWN_MEMORY[chat_id][symbol] = loop_count + 6 # Lock for 30 minutes
                     except Exception: pass
 
         if has_data and timeframe_data:
-            if total_confluence_score >= 5: global_bias = "POORA TEZ BUY"
-            elif total_confluence_score >= 1: global_bias = "UP KA RUKH"
-            elif total_confluence_score <= -5: global_bias = "POORA MANDI SHORT"
-            elif total_confluence_score <= -1: global_bias = "DOWN KA RUKH"
-            else: global_bias = "SIDEWAYS MARKET"
+            if total_confluence_score >= 5: global_bias = "POORA_TEZ_BUY 🚀"
+            elif total_confluence_score >= 1: global_bias = "UP_RUKH 🟢"
+            elif total_confluence_score <= -5: global_bias = "POORA_MANDI_SHORT 💥"
+            elif total_confluence_score <= -1: global_bias = "DN_RUKH 🔴"
+            else: global_bias = "SIDEWAYS ⏳"
             
             is_trap = any("WHALE_TRAP" in data[2] for data in timeframe_data.values())
             is_quant_top = any("SHORT_THOKO" in data[2] for data in timeframe_data.values())
             is_void = any("LIMIT_GAP" in data[1] for data in timeframe_data.values())
             is_fool_rush = any("FAKE_PUMP" in data[2] for data in timeframe_data.values())
             
-            if is_trap: header = "🎯🎯 ALFA SIGNAL: WHALE LIQUIDATION TRAP"
-            elif is_quant_top: header = "🎯 ALFA SIGNAL: SHORT THOKO ABHI"
-            elif is_void: header = "🎰 TERMINAL ALARM: ORDERBOOK VOID GAP"
-            elif is_fool_rush: header = "⚠️ RISK WARNING: FAKE UP RUSH ACTIVE"
+            if is_trap: header = "🎯🎯 ALFA: WHALE LIQUIDATION TRAP"
+            elif is_quant_top: header = "🎯 ALFA: SHORT THOKO ABHI"
+            elif is_void: header = "🎰 ALARM: ORDERBOOK VOID GAP"
+            elif is_fool_rush: header = "⚠️ RISK: FAKE UP RUSH"
             else: header = "🛰️ LIVE QUANT REPORT"
             
-            # 🖥️ PURE PLAIN TEXT NO-MATRIX BALANCED DESIGN
-            msg = f"<b>{header}: {symbol}</b>\n\n"
-            msg += f"Live Price: ${last_price:,.4f} ({node_source})\n"
-            msg += f"Whales Intel: {onchain_intel}\n"
-            msg += f"Overall Bias: {total_confluence_score:+} ({global_bias})\n"
-            msg += "==================================\n\n"
+            # 🖥️ HINGLISH PARAGRAPH-WISE CLEAN DESIGN MATRIX
+            msg = f"<b>{header}: {symbol}</b>\n"
+            msg += f"• Price: ${last_price:,.4f} ({node_source})\n"
+            msg += f"• Whales Intel: <code>{onchain_intel}</code>\n"
+            msg += f"• Net Bias: <code>{total_confluence_score:+} ({global_bias})</code>\n"
+            msg += "==================================\n"
+            msg += "<b>📋 LIVE MARKET STATUS MATRIX:</b>\n\n"
             
             for tf in TIMEFRAMES:
                 if tf in timeframe_data:
                     squeeze, order_flow_status, prediction, structure_trend = timeframe_data[tf]
-                    msg += f"• <b>Timeframe {tf}:</b>\n"
-                    msg += f"Trend {structure_trend} chal rha hai aur Volatility {squeeze} ha.\n"
-                    msg += f"Orderbook me {order_flow_status} ha.\n"
-                    msg += f"Forecast Signal: {prediction} chal rhi ha.\n\n"
+                    msg += f"⏱️ <b>{tf} Block:</b>\n"
+                    msg += f"<code>↳ Trend: {structure_trend} | Vol: {squeeze}\n"
+                    msg += f"↳ Orderbook: {order_flow_status}\n"
+                    msg += f"↳ Forecast: {prediction}</code>\n\n"
                     
             msg += "==================================\n"
-            msg += "💡 <i>Guide: Jab main top line me WHALE_TRAP ya SHORT_THOKO bajiye, tabhi trade thoko bhai.</i>"
+            msg += "💡 <i>Short Guide: Jab main header par WHALE_TRAP ya SHORT_THOKO dikhe, tabhi short entry thoko bhai.</i>"
             try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
             except Exception: pass
     except Exception: pass
