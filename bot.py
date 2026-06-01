@@ -35,7 +35,8 @@ TRACKED_PAIRS = {}
 TIMEFRAMES = ['5m', '15m', '1h', '4h']
 WAITING_FOR_COIN = {}
 SENT_ALERTS = {}
-COOLDOWN_MEMORY = {} # Anti-overtrading guard memory block
+COOLDOWN_MEMORY = {}
+LAST_MENU_MESSAGE = {}
 
 async def fetch_ohlcv_permitted(symbol, timeframe, limit=150):
     for exchange in EXCHANGES:
@@ -67,8 +68,8 @@ def fetch_orderbook_advanced_metrics(exchange, symbol):
             spread_pct = 0.0
             
         if spread_pct >= 0.25: return bid_ratio, "LIMIT_GAP"
-        if bid_ratio >= 65: return bid_ratio, f"{bid_ratio:.0f}%BUY"
-        elif bid_ratio <= 35: return bid_ratio, f"{(100 - bid_ratio):.0f}%SEL"
+        if bid_ratio >= 65: return bid_ratio, "BUYER_HIGH"
+        elif bid_ratio <= 35: return bid_ratio, "SELLER_HIGH"
         return bid_ratio, "NORMAL"
     except Exception:
         return 50.0, "SCANNING"
@@ -87,7 +88,7 @@ def scrape_public_onchain_intel(symbol):
             price_change = coin_data.get('market_data', {}).get('price_change_percentage_24h', 0)
             if vol_24h > 0 and mcap > 0:
                 v2m_ratio = vol_24h / mcap
-                if price_change < -10 and v2m_ratio > 0.35: return "WHALE_BUY"
+                if price_change < -10 and v2m_ratio > 0.35: return "WHALE_BUYING"
                 elif v2m_ratio > 0.40: return "WHALE_ACCUM"
                 elif v2m_ratio > 0.20: return "VOLUME_FLOW"
         return "HOLDERS_OK"
@@ -139,27 +140,28 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
         last_ema200 = df['ema_200'].iloc[-1] if 'ema_200' in df and len(df['ema_200']) > 0 else last_price
         p_p, p_t, _, _ = find_peaks_and_troughs(prices, ind_vals, window=2)
         
+        # Pure Simple Hindi Desi Trend Mapping Matrix
         structure_trend = "NORMAL"
         if total_candles <= 25:
-            if last_price > last_ema50: structure_trend, c_score = "CH_UP", c_score + 1
-            elif last_price < last_ema50: structure_trend, c_score = "CH_DN", c_score - 1
+            if last_price > last_ema50: structure_trend, c_score = "MICRO_TEJI", c_score + 1
+            elif last_price < last_ema50: structure_trend, c_score = "MICRO_MANDI", c_score - 1
         else:
             if len(p_p) >= 2 and len(p_t) >= 2:
                 higher_high, higher_low = p_p[-1][1] > p_p[-2][1], p_t[-1][1] > p_t[-2][1]
                 lower_high, lower_low = p_p[-1][1] < p_p[-2][1], p_t[-1][1] < p_t[-2][1]
-                if higher_high and higher_low and last_price > last_ema200: structure_trend, c_score = "TEZ_UP", c_score + 2
-                elif lower_high and lower_low and last_price < last_ema200: structure_trend, c_score = "TEZ_DN", c_score - 2
-                elif last_price > last_ema200: structure_trend, c_score = "HK_UP", c_score + 1
-                elif last_price < last_ema200: structure_trend, c_score = "HK_DN", c_score - 1
+                if higher_high and higher_low and last_price > last_ema200: structure_trend, c_score = "BHARI_TEJI", c_score + 2
+                elif lower_high and lower_low and last_price < last_ema200: structure_trend, c_score = "BHARI_MANDI", c_score - 2
+                elif last_price > last_ema200: structure_trend, c_score = "HALKI_TEJI", c_score + 1
+                elif last_price < last_ema200: structure_trend, c_score = "HALKI_MANDI", c_score - 1
             else:
                 if last_price >= last_ema200: structure_trend, c_score = "TEJI", c_score + 1
                 else: structure_trend, c_score = "MANDI", c_score - 1
 
-        squeeze_status = "SHANT"
+        squeeze_status = "SAB_SHANT"
         if total_candles >= 20 and len(bbws) >= 20:
-            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "MOVE_IN"
-            elif bbws[-1] >= np.percentile(bbws[-20:], 85): squeeze_status = "RUNNING"
-        else: squeeze_status = "NEW_PAIR"
+            if bbws[-1] <= np.percentile(bbws[-20:], 20): squeeze_status = "BADA_MOVE_IN"
+            elif bbws[-1] >= np.percentile(bbws[-20:], 85): squeeze_status = "VOLATILE"
+        else: squeeze_status = "NAYA_COIN"
             
         if "BUY" in order_flow_status: c_score += 1
         elif "SEL" in order_flow_status: c_score -= 1
@@ -171,38 +173,37 @@ def analyze_predictive_metrics(ohlcv_data, bid_pct, order_flow_status, symbol):
             is_delta_divergent = last_delta < 0
             is_velocity_decaying = len(rsis) >= 3 and (rsis[-1] - rsis[-2]) < (rsis[-2] - rsis[-3])
             
-            # Feature 1 Core Integration: Institutional Whale Stop Hunt Verification Loop
             is_whale_trap = total_candles >= 2 and highs[-1] > highs[-2] and prices[-1] < prices[-2]
             
             if order_flow_status == "LIMIT_GAP": future_pred, c_score = "VOID_TRAP", c_score - 3
             elif is_whale_trap and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "WHALE_TRAP", c_score - 5
             elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked and is_delta_divergent and is_velocity_decaying: future_pred, c_score = "SHORT_THOKO", c_score - 5
-            elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "DUM_KHATAM", c_score - 3
+            elif is_vol_exhausted and is_sell_wall_heavy and is_rsi_hooked: future_pred, c_score = "BUY_STOPPED", c_score - 3
             elif last_vol > (last_vol_ma * 2.5) and last_delta > 0: future_pred, c_score = "FAKE_PUMP", c_score + 2
             else: future_pred = "RUKO_WAIT"
         else:
             if total_candles <= 25:
                 if last_vol > (last_vol_ma * 3.0):
-                    future_pred, c_score = ("VOL_PUMP", c_score + 2) if last_price >= prices[-2] else ("VOL_DUMP", c_score - 2)
-                elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2: future_pred, c_score = "WHALE_SELL", c_score - 1
+                    future_pred, c_score = ("VOLUME_PUMP", c_score + 2) if last_price >= prices[-2] else ("VOLUME_DUMP", c_score - 2)
+                elif highs[-1] > last_price and (highs[-1] - last_price) > (last_price - lows[-1]) * 2: future_pred, c_score = "WHALE_SELLING", c_score - 1
             else:
                 if len(p_p) >= 2 and len(p_t) >= 2:
                     recent_high, recent_low = p_p[-1][1], p_t[-1][1]
-                    if last_price > recent_high and bid_pct <= 35: future_pred, c_score = "TRAP_SHORT", c_score - 2
-                    elif last_price < recent_low and bid_pct >= 65: future_pred, c_score = "TRAP_LONG", c_score + 2
-                    elif last_price > recent_high and "MANDI" in structure_trend: future_pred, c_score = "FLIP_UP", c_score + 2
-                    elif last_price < recent_low and "TEJI" in structure_trend: future_pred, c_score = "FLIP_DN", c_score - 2
-                    elif lows[-1] < recent_low and last_price > recent_low: future_pred, c_score = "HUNT_PUMP", c_score + 2
-                    elif highs[-1] > recent_high and last_price < recent_high: future_pred, c_score = "HUNT_DUMP", c_score - 2
+                    if last_price > recent_high and bid_pct <= 35: future_pred, c_score = "BREAKOUT_TRAP", c_score - 2
+                    elif last_price < recent_low and bid_pct >= 65: future_pred, c_score = "LIQUIDITY_HUNT", c_score + 2
+                    elif last_price > recent_high and "MANDI" in structure_trend: future_pred, c_score = "FLIP_BULLISH", c_score + 2
+                    elif last_price < recent_low and "TEJI" in structure_trend: future_pred, c_score = "FLIP_BEARISH", c_score - 2
+                    elif lows[-1] < recent_low and last_price > recent_low: future_pred, c_score = "LIQ_SWEEP_UP", c_score + 2
+                    elif highs[-1] > recent_high and last_price < recent_high: future_pred, c_score = "LIQ_SWEEP_DN", c_score - 2
 
         if future_pred == "SCAN":
-            if last_price > (last_vwap * 1.05): future_pred = "TOO_HIGH"
-            elif last_price < (last_vwap * 0.95): future_pred = "TOO_LOW"
+            if last_price > (last_vwap * 1.05): future_pred = "OVER_BOUGHT"
+            elif last_price < (last_vwap * 0.95): future_pred = "OVER_SOLD"
 
         anomaly_status = "Clear"
         if total_candles >= 15:
-            if len(p_t) >= 2 and len(ind_vals) >= 2 and p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: anomaly_status, c_score = "BUY_DIV", c_score + 1
-            if len(p_p) >= 2 and len(ind_vals) >= 2 and p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: anomaly_status, c_score = "SELL_DIV", c_score - 1
+            if len(p_t) >= 2 and len(ind_vals) >= 2 and p_t[-1][1] < p_t[-2][1] and ind_vals[-1] > ind_vals[-2]: anomaly_status, c_score = "BUY_DIVERGENCE", c_score + 1
+            if len(p_p) >= 2 and len(ind_vals) >= 2 and p_p[-1][1] > p_p[-2][1] and ind_vals[-1] < ind_vals[-2]: anomaly_status, c_score = "SELL_DIVERGENCE", c_score - 1
                 
         return structure_trend, squeeze_status, anomaly_status, future_pred, last_price, c_score
     except Exception as e:
@@ -215,7 +216,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3)
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT SNIPER TERMINAL v15.0 MASTER LIVE</b>\nWhale-Trap progression metrics embedded. Adaptive Cooldown loop filter deployed safely. Use /panel.",
+                text="🚀 <b>QUANT SNIPER TERMINAL v17.0 LIVE</b>\nUltimate screen friendly clean layout deployed safely bhai. Use /panel.",
                 parse_mode="HTML"
             )
         except Exception as e: logging.error(f"Startup fail: {e}")
@@ -234,19 +235,29 @@ def build_control_panel(chat_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚡ <b>WELCOME TO QUANT SNIPER TERMINAL</b>\n\n"
-        "👉 /panel - Control Panel Menu Kholein", 
+        "👉 /panel - Sticky Control Panel Menu Kholein.", 
         parse_mode="HTML"
     )
+
+async def clear_previous_sticky_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    if chat_id in LAST_MENU_MESSAGE:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=LAST_MENU_MESSAGE[chat_id])
+        except Exception:
+            pass
 
 async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
-    await update.message.reply_text(
+    await clear_previous_sticky_menu(context, chat_id)
+    
+    msg_inst = await update.message.reply_text(
         "🎛️ <b>QUANT SNIPER CONTROL PANEL</b>\n\n"
-        "Select an option below:",
+        "Niche diye gaye button se coins control karein:",
         reply_markup=build_control_panel(chat_id),
         parse_mode="HTML"
     )
+    LAST_MENU_MESSAGE[chat_id] = msg_inst.message_id
 
 async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -258,7 +269,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if data == "add_coin_click":
         WAITING_FOR_COIN[chat_id] = True
-        await query.message.reply_text("📝 Pair ka naam send karo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
+        await query.message.reply_text("📝 Jis pair ko track karna hai uska naam bhejo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
     elif data.startswith("stop_"):
         symbol = data.replace("stop_", "")
         if symbol in TRACKED_PAIRS[chat_id]:
@@ -266,10 +277,17 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             if symbol in SENT_ALERTS.get(chat_id, {}): del SENT_ALERTS[chat_id][symbol]
             if symbol in COOLDOWN_MEMORY.get(chat_id, {}): del COOLDOWN_MEMORY[chat_id][symbol]
             await query.message.reply_text(f"🛑 <b>{symbol}</b> list se hat gaya.", parse_mode="HTML")
-            await query.edit_message_reply_markup(reply_markup=build_control_panel(chat_id))
+            
+            await clear_previous_sticky_menu(context, chat_id)
+            new_panel_msg = await query.message.reply_text(
+                "🎛️ <b>QUANT SNIPER CONTROL PANEL</b>",
+                reply_markup=build_control_panel(chat_id),
+                parse_mode="HTML"
+            )
+            LAST_MENU_MESSAGE[chat_id] = new_panel_msg.message_id
     elif data.startswith("view_"):
         symbol = data.replace("view_", "")
-        await query.message.reply_text(f"🔍 <b>{symbol}</b> live monitoring loaded. Updates every 5m.", parse_mode="HTML")
+        await query.message.reply_text(f"🔍 <b>{symbol}</b> live monitoring chal rhi hai.", parse_mode="HTML")
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -277,16 +295,19 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if WAITING_FOR_COIN.get(chat_id, False):
         if "/" not in text_received:
-            await update.message.reply_text("❌ Format galat hai! Use: <code>SOL/USDT</code>", parse_mode="HTML")
+            await update.message.reply_text("❌ Format galat hai bhai! Use: <code>SOL/USDT</code>", parse_mode="HTML")
             return
         if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
         TRACKED_PAIRS[chat_id].add(text_received)
         WAITING_FOR_COIN[chat_id] = False
-        await update.message.reply_text(
-            f"✅ <b>{text_received}</b> add ho gaya!",
+        
+        await clear_previous_sticky_menu(context, chat_id)
+        new_panel_msg = await update.message.reply_text(
+            f"✅ <b>{text_received}</b> list mein add ho gaya!",
             reply_markup=build_control_panel(chat_id),
             parse_mode="HTML"
         )
+        LAST_MENU_MESSAGE[chat_id] = new_panel_msg.message_id
 
 async def monitoring_job(application: Application):
     loop_count = 0
@@ -295,11 +316,9 @@ async def monitoring_job(application: Application):
         loop_count += 1
         
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
-            # Initialize loop cooldown per chat block safely
             if chat_id not in COOLDOWN_MEMORY: COOLDOWN_MEMORY[chat_id] = {}
             
             for symbol in list(pairs):
-                # Anti-Overtrading Guard: Skip loop calculation if execution node is inside 30-min window (6 loops x 5 mins)
                 if COOLDOWN_MEMORY[chat_id].get(symbol, 0) > loop_count:
                     continue
                     
@@ -321,29 +340,26 @@ async def monitoring_job(application: Application):
                         timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend)
                         has_data = True
                         
-                        # Institutional Sniper Trigger Matrix Setup
                         if tf == "5m" and (prediction == "SHORT_THOKO" or prediction == "WHALE_TRAP"):
                             if chat_id not in SENT_ALERTS: SENT_ALERTS[chat_id] = {}
                             if SENT_ALERTS[chat_id].get(symbol) != last_price:
-                                alert_type = "WHALE STOP-HUNT TRAP CONFIRMED" if prediction == "WHALE_TRAP" else "INSTANT SNIPER TOP TARGET"
-                                sniper_msg = f"🎯 <b>🚨 {alert_type}: {symbol}</b>\n"
-                                sniper_msg += f"• Price: ${last_price:,.4f}\n"
-                                sniper_msg += f"• Book Walls: <code>{order_flow_status}</code>\n\n"
-                                sniper_msg += "🔥 <b>Bhai institutional liquidation dump start! Safest extreme entry open!</b>\n"
-                                sniper_msg += "🛑 <i>Anti-overtrading guard activated for 30 minutes.</i>"
+                                alert_type = "🚨 WHALE LIQUIDATION TRAP CONFIRMED" if prediction == "WHALE_TRAP" else "🎯 SNIPER TOP TARGET FOUND"
+                                sniper_msg = f"<b>{alert_type}: {symbol}</b>\n"
+                                sniper_msg += f"• Current Price: ${last_price:,.4f}\n"
+                                sniper_msg += f"• Orderbook Order: <code>{order_flow_status}</code>\n\n"
+                                sniper_msg += "🔥 <b>Bhai market orders ka dum toot chuka hai, yahan se safe reverse top lagne wala hai! Entry banao!</b>"
                                 try: 
                                     await application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML")
                                     SENT_ALERTS[chat_id][symbol] = last_price
-                                    # Set lock for 6 matrix iterations (6 * 5m = 30 minutes)
                                     COOLDOWN_MEMORY[chat_id][symbol] = loop_count + 6
                                 except Exception: pass
                                 
                     except Exception: pass
 
                 if has_data and timeframe_data:
-                    if total_confluence_score >= 5: global_bias = "TEZ_BUY 🚀"
+                    if total_confluence_score >= 5: global_bias = "POORA_TEZ_BUY 🚀"
                     elif total_confluence_score >= 1: global_bias = "UP_RUKH 🟢"
-                    elif total_confluence_score <= -5: global_bias = "MANDI_SHORT 💥"
+                    elif total_confluence_score <= -5: global_bias = "POORA_MANDI_SHORT 💥"
                     elif total_confluence_score <= -1: global_bias = "DN_RUKH 🔴"
                     else: global_bias = "SIDEWAYS ⏳"
                     
@@ -358,27 +374,43 @@ async def monitoring_job(application: Application):
                     elif is_fool_rush: header = "⚠️ RISK: FAKE UP RUSH"
                     else: header = "🛰️ LIVE QUANT REPORT"
                     
+                    # 🖥️ DESI LINE-BY-LINE NON-OVERLAPPING CLEAN FORMAT
                     msg = f"<b>{header}: {symbol}</b>\n"
                     msg += f"• Price: ${last_price:,.4f} ({node_source})\n"
-                    msg += f"• Intel: <code>{onchain_intel}</code>\n"
-                    msg += f"• Bias: <code>{total_confluence_score:+} ({global_bias})</code>\n"
+                    msg += f"• Whales Intel: <code>{onchain_intel}</code>\n"
+                    msg += f"• Net Bias: <code>{total_confluence_score:+} ({global_bias})</code>\n"
                     msg += "==================================\n"
-                    msg += "<code>TF   TREND    MOVE   BOOK     FORECAST</code>\n"
-                    msg += "----------------------------------\n"
+                    msg += "<b>📋 LIVE MARKET STATUS MATRIX:</b>\n\n"
+                    
                     for tf in TIMEFRAMES:
                         if tf in timeframe_data:
                             squeeze, order_flow_status, prediction, structure_trend = timeframe_data[tf]
-                            msg += f"<code>{tf:<5}{structure_trend:<9}{squeeze:<7}{order_flow_status:<9}</code>{prediction}\n"
+                            
+                            # Har ek timeframe ka data simple alag line mein safe bina bheed ke print hoga
+                            msg += f"⏱️ <b>{tf} Block:</b>\n"
+                            msg += f"<code>↳ Trend: {structure_trend} | Vol: {squeeze}\n"
+                            msg += f"↳ Orderbook: {order_flow_status}\n"
+                            msg += f"↳ Prediction: {prediction}</code>\n\n"
+                            
                     msg += "==================================\n"
-                    msg += "💡 <i>Short Guide: Header par WHALE_TRAP ya SHORT_THOKO aane par aur Bias heavy negative hone par Entry leni hai.</i>"
+                    msg += "💡 <i>Short Guide: Jab main header par WHALE_TRAP ya SHORT_THOKO dikhe, tabhi short thoko bhai.</i>"
                     
-                    try: await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
-                    except Exception: pass
+                    await clear_previous_sticky_menu(application, chat_id)
+                    try:
+                        new_anchored_msg = await application.bot.send_message(
+                            chat_id=chat_id, 
+                            text=msg, 
+                            reply_markup=build_control_panel(chat_id),
+                            parse_mode="HTML"
+                        )
+                        LAST_MENU_MESSAGE[chat_id] = new_anchored_msg.message_id
+                    except Exception: 
+                        pass
 
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
 @app.route('/')
-def health_check(): return "Supreme Core Engine Active", 200
+def health_check(): return "Supreme Clean Core Operational", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 5000))
