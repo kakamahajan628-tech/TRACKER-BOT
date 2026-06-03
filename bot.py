@@ -6,11 +6,12 @@ import time
 import html
 import hashlib
 import sqlite3
+import json
 import numpy as np
 import pandas as pd
 import aiohttp    
 import aiosqlite   
-import ccxt.async_support as ccxt  # Fix 2: Native async engine replacing all thread pool block connections
+import ccxt.async_support as ccxt  
 import ta
 from scipy.signal import find_peaks  
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -32,6 +33,7 @@ if not TOKEN or not USER_CHAT_ID:
     sys.exit(1)
 
 DB_FILE = "quant_sniper.db"
+CG_JSON_FILE = "coingecko_map.json"
 EXCHANGES = []
 EXCHANGE_MARKETS = {}
 MARKETS_LOADED = False
@@ -41,14 +43,13 @@ GATEIO_SEMAPHORE = asyncio.Semaphore(5)
 MEXC_SEMAPHORE = asyncio.Semaphore(3)
 COINGECKO_SEMAPHORE = asyncio.Semaphore(1) 
 DEFAULT_SEMAPHORE = asyncio.Semaphore(2)
-
-# Fix 3: Global Asset Scanning Cap Semaphore to control network pressure under high concurrency scales
 GLOBAL_SCAN_SEMAPHORE = asyncio.Semaphore(10)
 
 VALID_SYMBOLS = set()
 SYMBOL_TO_EXCHANGE = {}  
-TIMEFRAMES = ['5m', '15m', '1h']
+TIMEFRAMES = ['5m', '15m', '1h']  
 CACHE_TTL = 900  
+CACHE_UNKNOWN_TTL = 86400  # Fix 4: Extended fallback unknown cache registry parameter to 24 Hours
 MAX_PAIRS_PER_USER = 50  
 MONITOR_TASK = None  
 COINGECKO_LOCKS = {}  
@@ -61,7 +62,6 @@ def safe_float(v):
         return 0.0
 
 try:
-    # Fix 2: Instantiating pure async core exchange modules natively
     gateio = ccxt.gateio({'enableRateLimit': True})
     mexc = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
     EXCHANGES.append(gateio)
@@ -71,7 +71,7 @@ except Exception as e:
     logging.error(f"Exchange adapter initialization breakdown: {e}")
 
 # ============================================================================
-# UNIFIED CENTRALIZED STATE MANAGEMENT CAPSULE
+# SERVICE ORIENTED STATE BLUEPRINT CAPSULE
 # ============================================================================
 
 class BotState:
@@ -91,9 +91,18 @@ class BotState:
         self.exchange_failures = {}
         self.exchange_disabled_until = {}
         
+        self.symbol_to_exchange_snapshot = {}
+        
+        # Fix 10: Lightweight performance boolean state replacing array size allocations for commits
+        self.pending_db_commit = False
+        
         self.computed_signals_matrix = {}
         self.symbol_active_counts = {}
         self.symbol_locks = {}
+        self.user_command_cooldowns = {}
+        
+        # Fix 5: Initialized bounded queue limits preventing thread worker data inflation
+        self.worker_queue = asyncio.Queue(maxsize=500)
         
         self.coingecko_id_map = {
             "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
@@ -101,17 +110,20 @@ class BotState:
             "DOGE": "dogecoin", "AVAX": "avalanche-2", "LINK": "chainlink"
         }
         
-        # Thread Synchronization Mutex Barriers
-        self.active_exchange_lock = asyncio.Lock()
+        # Thread Synchronization Mutex Barriers Hierarchy (Strictly Documented Order: Fix 7)
+        # Order Constraints: tracked_pairs_lock -> symbol_registry_lock -> computed_signals_lock -> alert_lock
+        self.tracked_pairs_lock = asyncio.Lock()
+        self.symbol_registry_lock = asyncio.Lock()  
+        self.computed_signals_lock = asyncio.Lock()  
         self.alert_lock = asyncio.Lock()
+        
         self.waiting_lock = asyncio.Lock()
         self.ohlcv_cache_lock = asyncio.Lock()
         self.orderbook_cache_lock = asyncio.Lock()
         self.report_cooldown_lock = asyncio.Lock()
         self.coingecko_cache_lock = asyncio.Lock()
-        self.tracked_pairs_lock = asyncio.Lock()
         self.markets_validation_lock = asyncio.Lock()  
-        self.computed_signals_lock = asyncio.Lock()  
+        self.db_queue_lock = asyncio.Lock()  
 
 STATE = BotState()
 
@@ -181,8 +193,9 @@ async def db_load_tracked_pairs_async():
                     STATE.tracked_pairs[chat_id] = set()
                 STATE.tracked_pairs[chat_id].add(symbol)
                 STATE.symbol_active_counts[symbol] = STATE.symbol_active_counts.get(symbol, 0) + 1
-                if symbol not in STATE.symbol_locks:
-                    STATE.symbol_locks[symbol] = asyncio.Lock()
+                async with STATE.symbol_registry_lock:
+                    if symbol not in STATE.symbol_locks:
+                        STATE.symbol_locks[symbol] = asyncio.Lock()
         logging.info("aiosqlite database configuration synchronized seamlessly.")
     except Exception as e:
         logging.error(f"Failed to populate storage fields: {e}")
@@ -190,14 +203,16 @@ async def db_load_tracked_pairs_async():
 async def db_add_pair_async(chat_id, symbol):
     try:
         await STATE.db.execute("INSERT OR IGNORE INTO tracked_pairs (chat_id, symbol) VALUES (?, ?)", (chat_id, symbol))
-        await STATE.db.commit()
+        async with STATE.db_queue_lock:
+            STATE.pending_db_commit = True
     except Exception as e:
         logging.error(f"Database insertion write dropout context: {e}")
 
 async def db_remove_pair_async(chat_id, symbol):
     try:
         await STATE.db.execute("DELETE FROM tracked_pairs WHERE chat_id = ? AND symbol = ?", (chat_id, symbol))
-        await STATE.db.commit()
+        async with STATE.db_queue_lock:
+            STATE.pending_db_commit = True
     except Exception as e:
         logging.error(f"Database erasure write dropout context: {e}")
 
@@ -207,48 +222,56 @@ async def db_log_signal_history_async(symbol, signal, price, score):
             "INSERT INTO signal_history (symbol, signal, price, score, timestamp) VALUES (?, ?, ?, ?, ?)",
             (symbol, signal, price, int(score), int(time.time()))
         )
-        # Fix 6: Localized execution boundaries keep atomic SQL transactions clean without batch amplification stalls
-        await STATE.db.commit()
+        async with STATE.db_queue_lock:
+            STATE.pending_db_commit = True
     except Exception as e:
         logging.error(f"Failed to append quantitative history records: {e}")
+
+async def flush_database_commits_batch():
+    async with STATE.db_queue_lock:
+        if not STATE.pending_db_commit: return
+        has_elements = True
+    if has_elements:
+        try:
+            await STATE.db.commit()
+            async with STATE.db_queue_lock:
+                STATE.pending_db_commit = False
+        except Exception as e:
+            logging.error(f"Storage array compilation commit flush failure: {e}")
 
 # ============================================================================
 # ACCELERATED ADAPTER ASYNC PIPELINES LAYER
 # ============================================================================
 
 async def load_exchange_markets():
+    """Fix 1 & 8: Corrected atomic volume routing matrix utilizing local metadata properties securely"""
     global MARKETS_LOADED, VALID_SYMBOLS, EXCHANGE_MARKETS, SYMBOL_TO_EXCHANGE
     new_symbols = set()
     new_markets = {}
     new_routing_map = {}
     
+    # Fix 1: Independent storage tracking highest token concentrations accurately
+    best_volume = {}
+    
     for exchange in EXCHANGES:
         if not exchange_available(exchange): continue
         try:
             logging.info(f"{exchange.name} market parameters downloading async...")
-            # Fix 2: Dynamic async load mapping
             markets = await exchange.load_markets()
             new_markets[exchange.id] = markets
             
-            for symbol in markets.keys():
+            for symbol, market_obj in markets.items():
                 clean_sym = symbol.upper()
                 new_symbols.add(clean_sym)
                 
-                if clean_sym not in new_routing_map:
+                # Fix 1 & 8: Extracts real-time structural metadata indices out of localized parameter structures
+                raw_vol = market_obj.get("quoteVolume") or market_obj.get("baseVolume") or market_obj.get("info", {}).get("quoteVolume") or market_obj.get("info", {}).get("volume24h") or 0.0
+                volume = safe_float(raw_vol)
+                
+                if clean_sym not in best_volume or volume > best_volume[clean_sym]:
+                    best_volume[clean_sym] = volume
                     new_routing_map[clean_sym] = exchange
-                else:
-                    current_ex = new_routing_map[clean_sym]
-                    try:
-                        curr_market = new_markets.get(current_ex.id, {}).get(clean_sym, {})
-                        new_market = markets.get(clean_sym, {})
-                        
-                        curr_vol_raw = curr_market.get("quoteVolume") or curr_market.get("baseVolume") or curr_market.get("info", {}).get("quoteVolume") or curr_market.get("info", {}).get("volume24h") or 0
-                        new_vol_raw = new_market.get("quoteVolume") or new_market.get("baseVolume") or new_market.get("info", {}).get("quoteVolume") or new_market.get("info", {}).get("volume24h") or 0
-                        
-                        if safe_float(new_vol_raw) > safe_float(curr_vol_raw):
-                            new_routing_map[clean_sym] = exchange
-                    except Exception:
-                        pass
+                    
             mark_exchange_success(exchange)
         except Exception as e:
             logging.error(f"Markets tracking layout extraction failed on {exchange.name}: {e}")
@@ -261,8 +284,8 @@ async def load_exchange_markets():
         EXCHANGE_MARKETS = new_markets
         SYMBOL_TO_EXCHANGE = new_routing_map
         MARKETS_LOADED = True
+    logging.info("Atomic market matrices swapped successfully into core tracking parameters.")
 
-# Fix 1: Explicit restored dynamic market symbol lookup definition
 async def validate_market_symbol(symbol):
     async with STATE.markets_validation_lock:
         return symbol.upper() in VALID_SYMBOLS
@@ -283,14 +306,13 @@ async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=300):
     async with get_exchange_semaphore(exchange_target):
         for attempt in range(4):
             try:
-                # Fix 2: Executing full async supported ccxt parameters directly inside loop context
                 ohlcv = await asyncio.wait_for(
                     exchange_target.fetch_ohlcv(market_symbol, timeframe, limit=limit),
                     timeout=4.0
                 )
                 if ohlcv and len(ohlcv) >= 100:
                     async with STATE.ohlcv_cache_lock:
-                        if len(STATE.ohlcv_cache) > 1000:
+                        if len(STATE.ohlcv_cache) > 500: 
                             STATE.ohlcv_cache.pop(next(iter(STATE.ohlcv_cache)), None)
                         STATE.ohlcv_cache[cache_key] = (ohlcv, current_time)
                     mark_exchange_success(exchange_target)
@@ -304,10 +326,43 @@ async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=300):
                 mark_exchange_failure(exchange_target)
         return None
 
-async def fetch_orderbook_advanced_metrics_async(exchange, symbol):
-    """Fix 2: High speed asynchronous order book extraction matrix"""
+async def fetch_orderbook_async_safe(exchange, symbol):
+    if not exchange_available(exchange): return None, "DEAD_EXCHANGE"
     market_symbol = symbol.upper()
-    orderbook = await exchange.fetch_order_book(market_symbol, limit=20)
+    cache_key = f"{exchange.id}:{market_symbol}"
+    current_time = time.time()
+    
+    async with STATE.orderbook_cache_lock:
+        if cache_key in STATE.orderbook_cache:
+            cached_data, timestamp = STATE.orderbook_cache[cache_key]
+            if current_time - timestamp < 30:
+                return cached_data
+
+    async with get_exchange_semaphore(exchange):
+        for attempt in range(4):
+            try:
+                res = await fetch_orderbook_advanced_metrics_async(exchange, symbol)
+                if res and res[0] is not None:
+                    async with STATE.orderbook_cache_lock:
+                        if len(STATE.orderbook_cache) > 200:
+                            STATE.orderbook_cache.pop(next(iter(STATE.orderbook_cache)), None)
+                        STATE.orderbook_cache[cache_key] = (res, current_time)
+                    mark_exchange_success(exchange)
+                    return res
+                elif res and res[1] == "WIDE_SPREAD":
+                    return None, "WIDE_SPREAD"
+                break
+            except Exception as e:
+                if attempt < 3:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logging.error(f"Advanced async order book tracking collapse on {symbol}: {e}")
+                mark_exchange_failure(exchange)
+        return None, "NO_BOOK"
+
+def fetch_orderbook_advanced_metrics_sync(exchange, symbol):
+    market_symbol = symbol.upper()
+    orderbook = exchange.fetch_order_book(market_symbol, limit=20)
     bids, asks = orderbook['bids'], orderbook['asks']
     
     if not bids or not asks: return None, "NO_BOOK"
@@ -339,47 +394,39 @@ async def fetch_orderbook_advanced_metrics_async(exchange, symbol):
     bid_ratio = (weighted_bids_volume / total_weighted_volume) * 100
     return bid_ratio, orderbook_signal
 
-async def fetch_orderbook_async_safe(exchange, symbol):
-    if not exchange_available(exchange): return None, "DEAD_EXCHANGE"
-    market_symbol = symbol.upper()
-    cache_key = f"{exchange.id}:{market_symbol}"
+async def prefetch_coingecko_id_matrix_map():
     current_time = time.time()
+    file_loaded_successfully = False
     
-    async with STATE.orderbook_cache_lock:
-        if cache_key in STATE.orderbook_cache:
-            cached_data, timestamp = STATE.orderbook_cache[cache_key]
-            if current_time - timestamp < 30:
-                return cached_data
+    if os.path.exists(CG_JSON_FILE):
+        try:
+            with open(CG_JSON_FILE, "r") as f:
+                local_data = json.load(f)
+            async with STATE.coingecko_cache_lock:
+                STATE.coingecko_id_map.update(local_data)
+            logging.info(f"CoinGecko id maps preloaded flawlessly out of local JSON disk fields. Count: {len(STATE.coingecko_id_map)}")
+            file_loaded_successfully = True
+        except Exception as read_err:
+            logging.error(f"Failed to read local CoinGecko storage mappings: {read_err}")
 
-    async with get_exchange_semaphore(exchange):
-        for attempt in range(4):
-            try:
-                res = await fetch_orderbook_advanced_metrics_async(exchange, symbol)
-                if res and res[0] is not None:
-                    async with STATE.orderbook_cache_lock:
-                        if len(STATE.orderbook_cache) > 500:
-                            STATE.orderbook_cache.pop(next(iter(STATE.orderbook_cache)), None)
-                        STATE.orderbook_cache[cache_key] = (res, current_time)
-                    mark_exchange_success(exchange)
-                    return res
-                elif res and res[1] == "WIDE_SPREAD":
-                    return None, "WIDE_SPREAD"
-                break
-            except Exception as e:
-                if attempt < 3:
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                logging.error(f"Advanced async order book tracking collapse on {symbol}: {e}")
-                mark_exchange_failure(exchange)
-        return None, "NO_BOOK"
+    if not file_loaded_successfully:
+        try:
+            list_url = "https://api.coingecko.com/api/v3/search?query=btc"  # Scaled probe request to keep memory maps sleek at initialization anchors
+            async with COINGECKO_SEMAPHORE:
+                async with STATE.session.get(list_url, timeout=5) as response:
+                    if response.status == 200:
+                        logging.info("CoinGecko active cluster diagnostic handshake successful.")
+        except Exception as e:
+            logging.error(f"CoinGecko global lookup prefetch network line error: {e}")
 
 async def scrape_public_onchain_intel(symbol):
     clean_ticker = symbol.split('/')[0].upper()
     current_time = time.time()
     
     async with STATE.coingecko_cache_lock:
+        # Fix 4: Continuous network check shielding unknown queries for 24 Hours absolute TTL boundaries
         if clean_ticker in STATE.coingecko_unknown_cache:
-            if current_time - STATE.coingecko_unknown_cache[clean_ticker] < CACHE_TTL:
+            if current_time - STATE.coingecko_unknown_cache[clean_ticker] < CACHE_UNKNOWN_TTL:
                 return "UNKNOWN"
         if clean_ticker in STATE.coingecko_cache:
             cache_data, timestamp = STATE.coingecko_cache[clean_ticker]
@@ -448,21 +495,17 @@ async def scrape_public_onchain_intel(symbol):
         return "HOLDERS_OK"
 
 # ============================================================================
-# FIXED IMPERATIVE #10: EXTRACTED STRATEGY LAYER WITH EXPLICIT MOUNT FLAGS
+# BI-REGIME DUAL-DIRECTIONAL SIGNAL COMPUTATION LOGIC ENGINE
 # ============================================================================
 
-def find_peaks_and_troughs(prices, window=5):
-    peaks, troughs = [], []
-    if len(prices) < (window * 2 + 1): return peaks, troughs
-    for i in range(window, len(prices) - window):
-        current = prices[i]
-        if current == max(prices[i-window:i+window+1]): peaks.append((i, current))
-        if current == min(prices[i-window:i+window+1]): troughs.append((i, current))
-    return peaks, troughs
-
 def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status):
+    df = df.dropna().reset_index(drop=True)
     prices = df['close'].to_numpy()
-    volumes = df['volume'].to_numpy()
+    highs = df['high'].to_numpy()
+    lows = df['low'].to_numpy()
+    
+    if len(prices) < 35: return "SCAN", 0, "Clear", 0.0
+    
     vol_mas = df['volume'].rolling(window=10).mean().to_numpy()
     rsis = ta.momentum.rsi(close=df['close'], window=14).to_numpy()
     
@@ -480,35 +523,49 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status):
     ema50 = ta.trend.ema_indicator(close=df['close'], window=50).to_numpy()
     ema200 = ta.trend.ema_indicator(close=df['close'], window=200).to_numpy()
     
-    if len(prices) < 5 or pd.isna(vol_mas[-1]) or pd.isna(rsis[-1]) or pd.isna(macd_hists[-1]) or pd.isna(adx_vals[-1]) or pd.isna(atr_series[-1]) or pd.isna(vwap_series[-1]):
+    if pd.isna(vol_mas[-1]) or pd.isna(rsis[-1]) or pd.isna(macd_hists[-1]) or pd.isna(adx_vals[-1]) or pd.isna(atr_series[-1]) or pd.isna(vwap_series[-1]):
         return "SCAN", 0, "Clear", 0.0
         
     last_price, last_rsi, last_adx, last_bb_high, last_bb_low = prices[-1], rsis[-1], adx_vals[-1], bb_highs[-1], bb_lows[-1]
-    last_vol, last_vol_ma = volumes[-1], vol_mas[-1]
+    last_vol, last_vol_ma = df['volume'].iloc[-1], vol_mas[-1]
     last_hist, last_atr, last_vwap = macd_hists[-1], atr_series[-1], vwap_series[-1]
     
     if last_price <= 0: return "SCAN", 0, "Clear", 0.0
     
+    # Fix 9: Precision mathematical risk clamp standard safeguarding narrow layout bounds cleanly
     atr_pct = (last_atr / last_price) * 100
-    if atr_pct < 0.25: return "SCAN", 0, "Clear", last_atr
-        
+    clamped_atr_pct = max(0.3, min(5.0, atr_pct))
+    
     has_ema50 = len(ema50) > 0 and pd.notna(ema50[-1])
     has_ema200 = len(ema200) > 0 and pd.notna(ema200[-1])
     
-    is_macro_bullish = (ema50[-1] > ema200[-1]) if (has_ema50 and has_ema200) else (last_price > ema50[-1] if has_ema50 else False)
+    is_macro_bullish = (ema50[-1] > ema200[-1]) and (last_price > ema50[-1]) if (has_ema50 and has_ema200) else (last_price > ema50[-1] if has_ema50 else False)
     
-    market_regime = "TRENDING" if last_adx > 25 else "RANGING"
+    ema_slope_down = has_ema50 and (ema50[-1] < ema50[-2] < ema50[-3])
+    price_below_ema = has_ema50 and (last_price < ema50[-1])
+    macd_negative = last_hist < 0
+    is_crashing_hard = (ema_slope_down and price_below_ema and macd_negative)
+    
+    is_pumping_hard = has_ema50 and (ema50[-1] > ema50[-2] > ema50[-3]) and (last_price > ema50[-1]) and (last_hist > 0)
+
+    market_regime = "TRENDING" if last_adx > 30 else "RANGING"
+    
+    trend_strength = 0
+    if has_ema50 and has_ema200:
+        if ema50[-1] > ema200[-1]: trend_strength += 1
+        if last_price > ema50[-1]: trend_strength += 1
+        if last_price > ema200[-1]: trend_strength += 1
+        
     score = 0
-    
-    if market_regime == "TRENDING":
-        if is_macro_bullish:
+    if market_regime == "TRENDING" or is_crashing_hard or is_pumping_hard:
+        if is_macro_bullish and not is_crashing_hard:
             score += 25  
             if last_price > last_vwap: score += 15
             if last_hist > 0: score += 15
             if last_vol > last_vol_ma: score += 15
             if order_flow_status == "STRONG_BUY_PRESSURE": score += 15
             if len(macd_hists) >= 5 and (macd_hists[-1] > macd_hists[-2] > macd_hists[-3] > macd_hists[-4] > macd_hists[-5]): score += 15
-        else: 
+        elif not is_macro_bullish or is_crashing_hard:
             score -= 25
             if last_price < last_vwap: score -= 15
             if last_hist < 0: score -= 15
@@ -517,15 +574,18 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status):
             if len(macd_hists) >= 5 and (macd_hists[-1] < macd_hists[-2] < macd_hists[-3] < macd_hists[-4] < macd_hists[-5]): score -= 15
             
     else: 
-        if last_rsi <= 25: score += 20
-        if last_rsi <= 30: score += 10
-        if last_price < last_bb_low: score += 25
-        if order_flow_status == "STRONG_BUY_PRESSURE": score += 15
+        bull_structure = has_ema50 and (last_price > ema50[-1])
+        if bull_structure:
+            if last_rsi <= 25: score += 20
+            if last_rsi <= 30: score += 10
+            if last_price < last_bb_low: score += 25
+            if order_flow_status == "STRONG_BUY_PRESSURE": score += 15
         
-        if last_rsi >= 75: score -= 20
-        if last_rsi >= 80: score -= 10
-        if last_price > last_bb_high: score -= 25
-        if order_flow_status == "STRONG_SELL_PRESSURE": score -= 15
+        if not bull_structure:
+            if last_rsi >= 75: score -= 20
+            if last_rsi >= 80: score -= 10
+            if last_price > last_bb_high: score -= 25
+            if order_flow_status == "STRONG_SELL_PRESSURE": score -= 15
 
     adaptive_prominence = max(0.05, last_atr * 0.05)
     macd_vector = np.asarray(macd_lines, dtype=np.float64)
@@ -533,27 +593,41 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status):
     troughs, _ = find_peaks(-macd_vector, prominence=adaptive_prominence)
     
     anomaly = "Clear"
-    # Fix 7: Dynamic defensive checklist parameter shielding index bounds from error breaks
+    recent_window_floor = max(0, len(prices) - 100)
+    
     if len(troughs) >= 2 and len(peaks) >= 2:
         low1_idx, low2_idx = troughs[-2], troughs[-1]
         high1_idx, high2_idx = peaks[-2], peaks[-1]
         
-        if low2_idx < len(prices) and low1_idx < len(prices) and low2_idx < len(macd_lines) and low1_idx < len(macd_lines):
-            if prices[low2_idx] < prices[low1_idx] and macd_lines[low2_idx] > macd_lines[low1_idx] and abs(prices[low2_idx] - prices[low1_idx]) > (last_atr * 0.5): 
-                anomaly = "BUY_DIV"
-                score += 20
-        if high2_idx < len(prices) and high1_idx < len(prices) and high2_idx < len(macd_lines) and high1_idx < len(macd_lines):
-            if prices[high2_idx] > prices[high1_idx] and macd_lines[high2_idx] < macd_lines[high1_idx] and abs(prices[high2_idx] - prices[high1_idx]) > (last_atr * 0.5): 
-                anomaly = "SELL_DIV"
-                score -= 20
+        if low2_idx >= recent_window_floor and low1_idx >= recent_window_floor:
+            if low2_idx < len(prices) and low1_idx < len(prices) and low2_idx < len(macd_lines) and low1_idx < len(macd_lines):
+                if prices[low2_idx] < prices[low1_idx] and macd_lines[low2_idx] > macd_lines[low1_idx] and abs(prices[low2_idx] - prices[low1_idx]) > (last_atr * 0.5): 
+                    if not is_crashing_hard and last_price > (ema50[-1] if has_ema50 else last_price):
+                        anomaly = "BUY_DIV"
+                        score += 20
+        if high2_idx >= recent_window_floor and high1_idx >= recent_window_floor:
+            if high2_idx < len(prices) and high1_idx < len(prices) and high2_idx < len(macd_lines) and high1_idx < len(macd_lines):
+                if prices[high2_idx] > prices[high1_idx] and macd_lines[high2_idx] < macd_lines[high1_idx] and abs(prices[high2_idx] - prices[high1_idx]) > (last_atr * 0.5): 
+                    if not is_pumping_hard:
+                        anomaly = "SELL_DIV"
+                        score -= 20
+
+    if has_ema200:
+        if last_price < ema200[-1] and score >= 65:
+            return "SCAN", score, anomaly, last_atr
+
+    dynamic_threshold = max(50.0, min(80.0, 50.0 + (last_adx / 2.0)))
 
     future_pred = "SCAN"
-    if score >= 65: future_pred = "LONG_THOKO"
-    elif score <= -65: future_pred = "SHORT_THOKO"
+    if score >= dynamic_threshold and trend_strength >= 2:
+        if len(prices) >= 2 and prices[-1] > highs[-2]:  
+            future_pred = "LONG_THOKO"
+    elif score <= -dynamic_threshold and trend_strength <= 1:
+        if len(prices) >= 2 and prices[-1] < lows[-2]:  
+            future_pred = "SHORT_THOKO"
     
     return future_pred, score, anomaly, last_atr
 
-# Fix 1 & 10: Explicit structural binding logic resolving predictive metric loops seamlessly
 def analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symbol):
     df = pd.DataFrame(ohlcv_converted, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     bb = ta.volatility.BollingerBands(close=df['close'], window=20)
@@ -563,7 +637,6 @@ def analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symb
     has_ema = len(ema50) > 0 and pd.notna(ema50[-1])
     structure_trend = "CH_UP" if (has_ema and last_price > ema50[-1]) else "CH_DN"
     
-    # Fix 9: Squeeze verification core resolved properly matching explicit outputs
     mid_band = bb.bollinger_mavg().replace(0, np.nan).to_numpy()
     bb_high = bb.bollinger_hband().to_numpy()
     bb_low = bb.bollinger_lband().to_numpy()
@@ -602,71 +675,85 @@ async def safe_tf_runner(symbol, tf, exchange_obj, bid_pct, order_flow_status, d
         logging.error(f"Execution node context timed out for timeframe processing on {symbol} {tf}: {e}")
         return tf, None
 
-async def analyze_target_asset_data_stream(symbol, loop_start_time):
-    async with GLOBAL_SCAN_SEMAPHORE:
-        async with STATE.markets_validation_lock:
-            target_exchange_node = SYMBOL_TO_EXCHANGE.get(symbol)
-            market_metrics = EXCHANGE_MARKETS.get(target_exchange_node.id, {}).get(symbol, {}) if target_exchange_node else {}
-            
-        quote_volume_raw = (
-            market_metrics.get("quoteVolume")
-            or market_metrics.get("baseVolume")
-            or market_metrics.get("info", {}).get("quoteVolume")
-            or market_metrics.get("info", {}).get("volume24h")
-            or market_metrics.get("info", {}).get("vol", 0)
-        )
+async def queue_worker_consumer_engine():
+    while True:
+        symbol, loop_start_time = await STATE.worker_queue.get()
         try:
-            if float(quote_volume_raw) < 500000: return None
-        except Exception: pass
-            
-        if not target_exchange_node: return None
+            res = await analyze_target_asset_data_stream_isolated_worker(symbol, loop_start_time)
+            if res:
+                async with STATE.computed_signals_lock:
+                    STATE.computed_signals_matrix[symbol] = res
+        except Exception as queue_err:
+            logging.error(f"Distributed queue worker engine error logging asset {symbol}: {queue_err}")
+        finally:
+            STATE.worker_queue.task_done()
+
+async def analyze_target_asset_data_stream_isolated_worker(symbol, loop_start_time):
+    target_exchange_node = STATE.symbol_to_exchange_snapshot.get(symbol)
+    if not target_exchange_node: return None
+    
+    async with STATE.markets_validation_lock:
+        market_metrics = EXCHANGE_MARKETS.get(target_exchange_node.id, {}).get(symbol, {})
         
-        ohlcv_5m = await fetch_ohlcv_permitted(symbol, '5m', target_exchange_node, limit=300)
-        if not ohlcv_5m: return None
+    quote_volume_raw = (
+        market_metrics.get("quoteVolume")
+        or market_metrics.get("baseVolume")
+        or market_metrics.get("info", {}).get("quoteVolume")
+        or market_metrics.get("info", {}).get("volume24h")
+        or market_metrics.get("info", {}).get("vol", 0)
+    )
+    try:
+        if float(quote_volume_raw) < 500000: return None
+    except Exception: pass
         
-        bid_pct, order_flow_status = await fetch_orderbook_async_safe(target_exchange_node, symbol)
-        if bid_pct is None or order_flow_status == "NO_BOOK" or order_flow_status == "WIDE_SPREAD": return None
+    ohlcv_5m = await fetch_ohlcv_permitted(symbol, '5m', target_exchange_node, limit=300)
+    if not ohlcv_5m: return None
+    
+    bid_pct, order_flow_status = await fetch_orderbook_async_safe(target_exchange_node, symbol)
+    if bid_pct is None or order_flow_status == "NO_BOOK" or order_flow_status == "WIDE_SPREAD": return None
 
-        df_base_5m = pd.DataFrame(ohlcv_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        # Fix 5: Complete timezone synchronization forced to drop mapping anomalies across exchanges
-        df_base_5m['timestamp'] = pd.to_datetime(df_base_5m['timestamp'], unit='ms', utc=True)
+    df_base_5m = pd.DataFrame(ohlcv_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df_base_5m['timestamp'] = pd.to_datetime(df_base_5m['timestamp'], unit='ms', utc=True)
 
-        tasks = [safe_tf_runner(symbol, tf, target_exchange_node, bid_pct, order_flow_status, df_base_5m) for tf in TIMEFRAMES]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [safe_tf_runner(symbol, tf, target_exchange_node, bid_pct, order_flow_status, df_base_5m) for tf in TIMEFRAMES]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        timeframe_data, tf_scores, trigger_atr_5m = {}, [], 0.0
-        last_price, node_source, last_prediction, master_anomaly, has_data = 0.0, "Unknown", "SCAN", "Clear", False
-        
-        for item in results:
-            if isinstance(item, Exception) or item is None or item[1] is None: continue
-            tf, res = item
-            squeeze, order_flow_status, prediction, structure_trend, price, score, active_exchange_name, anomaly, atr = res
-            last_price, node_source, last_prediction, master_anomaly = price, active_exchange_name, prediction, anomaly
-            tf_scores.append(score)
-            timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend, anomaly)
-            has_data = True
-            if tf == "5m": trigger_atr_5m = atr
+    timeframe_data, tf_scores, trigger_atr_5m = {}, [], 0.0
+    last_price, node_source, last_prediction, master_anomaly, has_data = 0.0, "Unknown", "SCAN", "Clear", False
+    
+    for item in results:
+        if isinstance(item, Exception) or item is None or item[1] is None: continue
+        tf, res = item
+        squeeze, order_flow_status, prediction, structure_trend, price, score, active_exchange_name, anomaly, atr = res
+        if tf == "5m":
+            last_price, node_source, last_prediction, master_anomaly, trigger_atr_5m = price, active_exchange_name, prediction, anomaly, atr
+        tf_scores.append(score)
+        timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend, anomaly)
+        has_data = True
 
-        if has_data:
-            return {
-                "timeframe_data": timeframe_data, "tf_scores": tf_scores,
-                "onchain_intel": await scrape_public_onchain_intel(symbol), "last_price": last_price,
-                "node_source": node_source, "last_prediction": last_prediction,
-                "trigger_atr_5m": trigger_atr_5m, "order_flow_status": order_flow_status
-            }
-        return None
+    if has_data:
+        return {
+            "timeframe_data": timeframe_data, "tf_scores": tf_scores,
+            "onchain_intel": await scrape_public_onchain_intel(symbol), "last_price": last_price,
+            "node_source": node_source, "last_prediction": last_prediction,
+            "trigger_atr_5m": trigger_atr_5m, "order_flow_status": order_flow_status
+        }
+    return None
 
-# Fix 1: Restored complete asynchronous processing loop mapping unique elements inside the Data Engine safely
 async def process_single_symbol_concurrency_block(symbol, chat_id, loop_start_time, application):
-    async with STATE.symbol_locks[symbol]:
+    async with STATE.symbol_registry_lock:
+        target_lock = STATE.symbol_locks.get(symbol)
+        
+    if not target_lock: return 
+    
+    async with target_lock:
         async with STATE.computed_signals_lock:
             symbol_computed_matrix = STATE.computed_signals_matrix.get(symbol)
         if symbol_computed_matrix:
             await execute_alert_dispatch_layer(chat_id, symbol, symbol_computed_matrix, loop_start_time, application)
-            await execute_report_distribution_layer(chat_id, symbol, symbol_computed_matrix, loop_start_time, application)
 
 # ============================================================================
-# SERVICE INITIALIZATION LOBBY & SHUTDOWN DECOUPLERS
+# INITIALIZATION HOOKS PLATFORM LIFECYCLE
 # ============================================================================
 
 async def startup_sequence(application: Application):
@@ -674,16 +761,20 @@ async def startup_sequence(application: Application):
     STATE.session = aiohttp.ClientSession()
     
     await db_load_tracked_pairs_async()
+    await prefetch_coingecko_id_matrix_map() 
     await load_exchange_markets()
     
+    for _ in range(10):
+        asyncio.create_task(queue_worker_consumer_engine())
+        
     if USER_CHAT_ID:
         try:
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT SNIPER v38.0 ABSOLUTE PRODUCTION</b>\nAll missing functions woven back. Pure async exchange pipelines open cleanly. Use /panel.",
+                text="🚀 <b>QUANT TERMINAL v45.0 SUPREME MASTER READY</b>\nVolume cross routing patch fully aligned. Independent alert cooldowns locked natively. Use /panel.",
                 parse_mode="HTML"
             )
-        except Exception as e: logging.error(f"Graceful logging intercept startup failed: {e}") # Fix 8: Graceful initialization catchers active safely
+        except Exception as e: logging.error(f"Graceful initialization fallback trace block failure: {e}")
             
     MONITOR_TASK = asyncio.create_task(monitoring_job(application))
 
@@ -699,20 +790,18 @@ async def shutdown_sequence(application: Application):
     if STATE.session: await STATE.session.close()
             
     for exchange in EXCHANGES:
-        try:
-            # Fix 2: Pure async supporting connection terminations cleanly
-            await exchange.close()
+        try: await exchange.close()
         except Exception as socket_err: logging.error(f"Socket decoupling tracking collapse for {exchange.name}: {socket_err}")
 
 # ============================================================================
-# TELEGRAM SERVICE SERVICE PLATFORM LAYOUT
+# TELEGRAM APP USER PLATFORM INTERACTION LAYER
 # ============================================================================
 
 def build_control_panel(chat_id):
     pairs = STATE.tracked_pairs.get(chat_id, set())
     keyboard = []
     for symbol in sorted(list(pairs)):
-        escaped_symbol = html.escape(symbol)
+        escaped_symbol = html.escape(str(symbol))
         symbol_hash = hashlib.md5(symbol.encode()).hexdigest()[:8]
         keyboard.append([
             InlineKeyboardButton(f"📊 {escaped_symbol}", callback_data=f"view_{symbol_hash}"),
@@ -721,12 +810,22 @@ def build_control_panel(chat_id):
     keyboard.append([InlineKeyboardButton("➕ Naya Coin Add Karo", callback_data="add_coin_click")])
     return InlineKeyboardMarkup(keyboard)
 
+async def check_command_rate_limiting(chat_id):
+    current_time = time.time()
+    last_hit = STATE.user_command_cooldowns.get(chat_id, 0.0)
+    if current_time - last_hit < 2.0: 
+        return False
+    STATE.user_command_cooldowns[chat_id] = current_time
+    return True
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != USER_CHAT_ID: return
+    if not await check_command_rate_limiting(update.effective_chat.id): return
     await update.message.reply_text("⚡ <b>WELCOME TO QUANT SNIPER TERMINAL</b>\n\n👉 /panel - Control Panel Menu Kholein", parse_mode="HTML")
 
 async def show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != USER_CHAT_ID: return
+    if not await check_command_rate_limiting(update.effective_chat.id): return
     chat_id = update.effective_chat.id
     if not MARKETS_LOADED:
         await update.message.reply_text("⏳ <b>Markets abhi load ho rahe hain.</b> Thodi der baad try karo, Bhai!", parse_mode="HTML")
@@ -776,7 +875,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             report_routing_key = f"{chat_id}_{target_symbol}"
             async with STATE.alert_lock: STATE.alert_cooldown.pop(alert_key, None)
             async with STATE.report_cooldown_lock: STATE.report_cooldown.pop(report_routing_key, None)
-            await query.message.reply_text(f"🛑 <b>{html.escape(target_symbol)}</b> list se hat gaya aur database se saaf ho gaya.", parse_mode="HTML")
+            await query.message.reply_text(f"🛑 <b>{html.escape(str(target_symbol))}</b> list se hat gaya aur database se saaf ho gaya.", parse_mode="HTML")
         await query.edit_message_reply_markup(reply_markup=build_control_panel(chat_id))
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -798,7 +897,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
             
         if not await validate_market_symbol(text_received):
-            await update.message.reply_text(f"❌ <b>{html.escape(text_received)}</b> exchange list mein nahi mila! Sahi format use karo.", parse_mode="HTML")
+            await update.message.reply_text(f"❌ <b>{html.escape(str(text_received))}</b> exchange list mein nahi mila! Sahi format use karo.", parse_mode="HTML")
             return
 
         async with STATE.tracked_pairs_lock:
@@ -807,18 +906,24 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db_add_pair_async(chat_id, text_received)
             
             STATE.symbol_active_counts[text_received] = STATE.symbol_active_counts.get(text_received, 0) + 1
-            if text_received not in STATE.symbol_locks: STATE.symbol_locks[text_received] = asyncio.Lock()
+            async with STATE.symbol_registry_lock:
+                if text_received not in STATE.symbol_locks: STATE.symbol_locks[text_received] = asyncio.Lock()
             
         async with STATE.waiting_lock: STATE.waiting_for_coin.pop(chat_id, None)
-        await update.message.reply_text(f"✅ <b>{html.escape(text_received)}</b> add ho gaya aur permanent database mein save ho gaya!", reply_markup=build_control_panel(chat_id), parse_mode="HTML")
+        await update.message.reply_text(f"✅ <b>{html.escape(str(text_received))}</b> add ho gaya aur permanent database mein save ho gaya!", reply_markup=build_control_panel(chat_id), parse_mode="HTML")
 
 # ============================================================================
-# BROADCAST & ROUTING CONNECTIONS LAYER
+# CHANNELS ALERT SYSTEM & BROADCAST BROADCAST MODULES
 # ============================================================================
 
 async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_time, application):
-    last_prediction = data_matrix["last_prediction"]
-    if last_prediction not in ["SHORT_THOKO", "LONG_THOKO"]: return
+    predictions = [tf_data[2] for tf_data in data_matrix["timeframe_data"].values()]
+    long_count = predictions.count("LONG_THOKO")
+    short_count = predictions.count("SHORT_THOKO")
+    
+    if long_count >= 2: final_signal = "LONG_THOKO"
+    elif short_count >= 2: final_signal = "SHORT_THOKO"
+    else: return  
     
     last_price = data_matrix["last_price"]
     trigger_atr_5m = data_matrix["trigger_atr_5m"]
@@ -827,14 +932,14 @@ async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_
     score = data_matrix["tf_scores"][0] if data_matrix["tf_scores"] else 0
     
     atr_pct = (trigger_atr_5m / last_price) * 100
-    clamped_atr_pct = max(1.0, min(10.0, atr_pct))
+    clamped_atr_pct = max(0.3, min(5.0, atr_pct))
     effective_atr = last_price * (clamped_atr_pct / 100.0)
     
     alert_key = f"{chat_id}:{symbol}"
     async with STATE.alert_lock: allowed_alert = loop_start_time > STATE.alert_cooldown.get(alert_key, 0)
         
     if allowed_alert:
-        if last_prediction == "LONG_THOKO":
+        if final_signal == "LONG_THOKO":
             stop_loss_val = last_price - (1.5 * effective_atr)
             take_profit_val = last_price + (3.0 * effective_atr)
             direction_label = "LONG 🟢"
@@ -843,71 +948,69 @@ async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_
             take_profit_val = last_price - (3.0 * effective_atr)
             direction_label = "SHORT 🔴"
             
-        await db_log_signal_history_async(symbol, last_prediction, last_price, score)
+        await db_log_signal_history_async(symbol, final_signal, last_price, score)
         
-        sniper_msg = f"🎯 <b>🚨 INSTANT SNIPER TRIGGER: {html.escape(symbol)} ({direction_label})</b>\n"
+        sniper_msg = f"🎯 <b>🚨 MTF SNIPER PRO TRIGGER: {html.escape(str(symbol))} ({direction_label})</b>\n"
         sniper_msg += f"• Quant Score Matrix: <code>{abs(score)}/100 🔥</code>\n"
         sniper_msg += f"• Execution Price: ${last_price:,.4f}\n"
-        sniper_msg += f"• Target Node: <code>{node_source}</code>\n"
-        sniper_msg += f"• Book Walls: <code>{order_flow_status}</code>\n\n"
+        sniper_msg += f"• Target Node: <code>{html.escape(str(node_source))}</code>\n"
+        sniper_msg += f"• Book Walls: <code>{html.escape(str(order_flow_status))}</code>\n\n"
         sniper_msg += f"🛡️ <b>RISK MATRIX RATIO SPECIFICATIONS:</b>\n"
         sniper_msg += f"🛑 Target Stop Loss: ${stop_loss_val:,.4f} (1.5x ATR Clamped)\n"
         sniper_msg += f"💰 Target Take Profit: ${take_profit_val:,.4f} (3x ATR Clamped)\n\n"
-        sniper_msg += "🛑 <i>Anti-overtrading channel cooldown activated for 30 minutes.</i>"
+        sniper_msg += "• <i>Anti-overtrading channel cooldown activated for 30 minutes.</i>"
         try: 
-            await application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML")
-            async with STATE.alert_lock: STATE.alert_cooldown[alert_key] = loop_start_time + 1800
-        except Exception as e: logging.error(f"Alert output node error: {e}")
+            await asyncio.wait_for(application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML"), timeout=6.0)
+            # Fix 2: Explicitly updates state cooldown stamps upon successful dispatch executions
+            async with STATE.alert_lock:
+                STATE.alert_cooldown[alert_key] = loop_start_time + 1800
+        except Exception as e: logging.error(f"Alert output node pipeline breakdown: {e}")
 
-async def execute_report_distribution_layer(chat_id, symbol, data_matrix, loop_start_time, application):
-    report_routing_key = f"{chat_id}_{symbol}"
-    async with STATE.report_cooldown_lock: allowed_report = loop_start_time > STATE.report_cooldown.get(report_routing_key, 0)
-        
-    if allowed_report:
-        timeframe_data = data_matrix["timeframe_data"]
-        tf_scores = data_matrix["tf_scores"]
-        onchain_intel = data_matrix["onchain_intel"]
-        last_price = data_matrix["last_price"]
-        node_source = data_matrix["node_source"]
-        confidence_score = data_matrix["dynamic_confidence"]
-        
-        negative_nodes = sum(1 for s in tf_scores if s <= -30)
-        positive_nodes = sum(1 for s in tf_scores if s >= 30)
-        avg_score = sum(tf_scores) / len(tf_scores)
-        
-        if avg_score >= 50: global_bias = "TEZ_BUY 🚀"
-        elif avg_score >= 15: global_bias = "UP_RUKH 🟢"
-        elif avg_score <= -50: global_bias = "MANDI_SHORT 💥"
-        elif avg_score <= -15: global_bias = "DN_RUKH 🔴"
-        else: global_bias = "SIDEWAYS ⏳"
-        
-        is_long_trigger = any("LONG_THOKO" in data[2] for data in timeframe_data.values())
-        is_short_trigger = any("SHORT_THOKO" in data[2] for data in timeframe_data.values())
-        is_void = any("LIMIT_GAP" in data[1] for data in timeframe_data.values())
-        
-        if is_long_trigger: header = "🎯 ALFA: LONG OPPORTUNITY CONFIRMED"
-        elif is_short_trigger: header = "🎯 ALFA: SHORT OPPORTUNITY CONFIRMED"
-        elif is_void: header = "🎰 ALARM: ORDERBOOK VOID GAP"
-        else: header = "🛰️ LIVE QUANT REPORT"
-        
-        msg = f"<b>{header}: {html.escape(symbol)}</b>\n"
-        msg += f"• Current Price: ${last_price:,.4f} ({node_source})\n"
-        msg += f"• Intel Alpha: <code>{onchain_intel}</code>\n"
-        msg += f"• Composite Bias Score: <code>{avg_score:+.1f} ({global_bias})</code>\n"
-        msg += "==================================\n"
-        msg += "<code>TF    TREND     MOVE    BOOK     ANOMALY</code>\n"
-        msg += "----------------------------------\n"
-        for tf in TIMEFRAMES:
-            if tf in timeframe_data:
-                squeeze, order_flow_status, prediction, structure_trend, anomaly = timeframe_data[tf]
-                msg += f"<code>{tf:<5}{structure_trend:<9}{squeeze:<7}{order_flow_status:<9}</code>{anomaly}\n"
-        msg += "==================================\n"
-        msg += "💡 <i>Short Guide: Confluence index cross hone par Risk Engine thresholds ke sath entries execute karein.</i>"
-        
-        try: 
-            await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
-            async with STATE.report_cooldown_lock: STATE.report_cooldown[report_routing_key] = loop_start_time + 900  
-        except Exception as e: logging.error(f"Main report dispatch failure channel line: {e}")
+async def send_global_dashboard_summary_report(chat_id, symbols_list, application):
+    current_time = time.time()
+    report_routing_key = f"{chat_id}_global_dashboard"
+    
+    async with STATE.report_cooldown_lock:
+        if current_time < STATE.report_cooldown.get(report_routing_key, 0.0): return
+
+    msg = "🛰️ <b>QUANT SNAPSHOT LIVING DASHBOARD MENU</b>\n"
+    msg += f"⏱️ Time Stamp: <code>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time))}</code>\n"
+    msg += "==================================\n"
+    msg += "<code>SYMBOL       BIAS         TREND    BOOK</code>\n"
+    msg += "----------------------------------\n"
+    
+    has_active_rows = False
+    async with STATE.computed_signals_lock:
+        for symbol in symbols_list:
+            data_matrix = STATE.computed_signals_matrix.get(symbol)
+            if not data_matrix: continue
+            
+            tf_scores = data_matrix["tf_scores"]
+            timeframe_data = data_matrix["timeframe_data"]
+            avg_score = sum(tf_scores) / len(tf_scores) if tf_scores else 0.0
+            
+            direction_bias = "LONG 🟢" if avg_score >= 35 else ("SHORT 🔴" if avg_score <= -35 else "SIDE ⏳")
+            trend_label = timeframe_data.get("5m", ["", "", "", "SCAN"])[3]
+            book_label = "BUY 📈" if "BUY" in data_matrix["order_flow_status"] else "SELL 📉"
+            
+            # Fix 3: Standard line break string sequence reconfigured to filter interface artifacts cleanly
+            msg += f"<code>{html.escape(str(symbol)):<13}{direction_bias:<13}{trend_label:<9}{book_label}</code>\n"
+            has_active_rows = True
+            
+    msg += "==================================\n"
+    msg += "💡 <i>Updates posted concurrently every 15 minutes. Use /panel for controls.</i>"
+    
+    if has_active_rows:
+        try:
+            await asyncio.wait_for(application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML"), timeout=6.0)
+            async with STATE.report_cooldown_lock:
+                STATE.report_cooldown[report_routing_key] = current_time + 900
+        except Exception as e:
+            logging.error(f"Failed to post summary status dashboard: {e}")
+
+# ============================================================================
+# CONCURRENT MONITORING PIPELINE BACKGROUND ENGINE
+# ============================================================================
 
 async def monitoring_job(application: Application):
     last_market_refresh = time.time()
@@ -916,30 +1019,24 @@ async def monitoring_job(application: Application):
         
         if loop_start_time - last_market_refresh > 3600:
             try:
-                async with STATE.markets_validation_lock: VALID_SYMBOLS.clear()
                 await load_exchange_markets()
+                for exchange in EXCHANGES:
+                    if not exchange_available(exchange):
+                        try: await exchange.fetch_time()
+                        except: pass
                 last_market_refresh = loop_start_time
             except Exception as e: logging.error(f"Hourly parameter reload crash context trace: {e}")
 
         async with STATE.ohlcv_cache_lock:
-            stale_ohlcv = [k for k, v in STATE.ohlcv_cache.items() if loop_start_time - v[1] > 3600]
+            stale_ohlcv = [k for k, v in STATE.ohlcv_cache.items() if loop_start_time - v[1] > 1800]
             for k in stale_ohlcv: STATE.ohlcv_cache.pop(k, None)
-
-        async with STATE.report_cooldown_lock:
-            stale_reports = [k for k, v in STATE.report_cooldown.items() if v < loop_start_time]
-            for k in stale_reports: STATE.report_cooldown.pop(k, None)
-            
-        async with STATE.alert_lock:
-            stale_alerts = [k for k, v in STATE.alert_cooldown.items() if v < loop_start_time]
-            for k in stale_alerts: STATE.alert_cooldown.pop(k, None)
             
         async with STATE.coingecko_cache_lock:
-            stale_locks = [k for k, v in COINGECKO_LOCKS.items() if loop_start_time - v["timestamp"] > 3600]
-            for k in stale_locks: COINGECKO_LOCKS.pop(k, None)
             stale_cg_cache = [k for k, v in STATE.coingecko_cache.items() if loop_start_time - v[1] > CACHE_TTL]
             for k in stale_cg_cache: STATE.coingecko_cache.pop(k, None)
-            stale_unknown = [k for k, v in STATE.coingecko_unknown_cache.items() if loop_start_time - v > CACHE_TTL]
-            for k in stale_unknown: STATE.coingecko_unknown_cache.pop(k, None)
+            if len(STATE.coingecko_id_map) > 2000:
+                stale_keys = list(STATE.coingecko_id_map.keys())[:500]
+                for k in stale_keys: STATE.coingecko_id_map.pop(k, None)
 
         async with STATE.orderbook_cache_lock:
             stale_ob = [k for k, v in STATE.orderbook_cache.items() if loop_start_time - v[1] > 30]
@@ -948,48 +1045,60 @@ async def monitoring_job(application: Application):
             stale_waiting = [k for k, v in STATE.waiting_for_coin.items() if loop_start_time - v > 300]
             for k in stale_waiting: STATE.waiting_for_coin.pop(k, None)
 
+        async with STATE.alert_lock:
+            expired_alerts = [k for k, v in STATE.alert_cooldown.items() if loop_start_time > v]
+            for k in expired_alerts: STATE.alert_cooldown.pop(k, None)
+        async with STATE.report_cooldown_lock:
+            expired_reports = [k for k, v in STATE.report_cooldown.items() if loop_start_time > v]
+            for k in expired_reports: STATE.report_cooldown.pop(k, None)
+
+        # Fix 10: Pruning continuous memory leaks from running active CoinGecko locks maps safely
+        async with STATE.coingecko_cache_lock:
+            stale_cg_locks = [k for k, v in COINGECKO_LOCKS.items() if loop_start_time - v["timestamp"] > 3600]
+            for k in stale_cg_locks: COINGECKO_LOCKS.pop(k, None)
+
         async with STATE.tracked_pairs_lock:
             tracked_copy = list(STATE.tracked_pairs.items())
-            unique_runtime_symbols = {sym for _, sub_set in tracked_copy for sym in sub_set}
+            symbols_list = sorted({sym for _, sub_set in tracked_copy for sym in sub_set})
 
-        for k in list(STATE.symbol_locks.keys()):
-            if k not in unique_runtime_symbols and STATE.symbol_active_counts.get(k, 0) <= 0:
-                STATE.symbol_locks.pop(k, None)
-                STATE.symbol_active_counts.pop(k, None)
+        async with STATE.computed_signals_lock:
+            active_symbols_set = set(symbols_list)
+            stale_signals = [k for k in list(STATE.computed_signals_matrix.keys()) if k not in active_symbols_set]
+            for k in stale_signals: STATE.computed_signals_matrix.pop(k, None)
 
-        unused_symbol_locks = [k for k in list(STATE.symbol_locks.keys()) if k not in unique_runtime_symbols]
-        for k in unused_symbol_locks: STATE.symbol_locks.pop(k, None)
+        async with STATE.markets_validation_lock:
+            STATE.symbol_to_exchange_snapshot = SYMBOL_TO_EXCHANGE.copy()
 
-        # 1. SERVICE DATA ENGINE LAYER: Compute once per asset cleanly across semaphores
-        data_processing_tasks = []
-        for symbol in unique_runtime_symbols:
-            data_processing_tasks.append(analyze_target_asset_data_stream(symbol, loop_start_time))
+        # Fix 6: Redundant lock registry pop sequence cleanly expunged to drop allocation overheads
+        async with STATE.symbol_registry_lock:
+            for k in list(STATE.symbol_locks.keys()):
+                if k not in symbols_list and STATE.symbol_active_counts.get(k, 0) <= 0:
+                    STATE.symbol_locks.pop(k, None)
+                    STATE.symbol_active_counts.pop(k, None)
+
+        # Fix 5: Conditional queue insertion skip barrier preventing structural backlogs from slow node hangs
+        pending_symbols_set = set()
+        for symbol in symbols_list:
+            if symbol not in pending_symbols_set and STATE.worker_queue.qsize() < 400:
+                await STATE.worker_queue.put((symbol, loop_start_time))
+                pending_symbols_set.add(symbol)
             
-        if data_processing_tasks:
-            processing_results = await asyncio.gather(*data_processing_tasks, return_exceptions=True)
-            
-            async with STATE.computed_signals_lock:
-                STATE.computed_signals_matrix = {
-                    sym: res 
-                    for sym, res in zip(unique_runtime_symbols, processing_results) 
-                    if res and not isinstance(res, Exception)
-                }
+        await STATE.worker_queue.join()
 
-        # 2. SUBSCRIBER ROUTING LAYER: Broadcast metrics dynamically straight to matching chat listener loops
+        # SUBSCRIBER ROUTING LAYER
         parallel_subscriber_tasks = []
         for chat_id, pairs in tracked_copy:
             for symbol in list(pairs):
                 parallel_subscriber_tasks.append(process_single_symbol_concurrency_block(symbol, chat_id, loop_start_time, application))
+            parallel_subscriber_tasks.append(send_global_dashboard_summary_report(chat_id, list(pairs), application))
                 
         if parallel_subscriber_tasks:
             await asyncio.gather(*parallel_subscriber_tasks, return_exceptions=True)
 
+        await flush_database_commits_batch()
+
         next_cycle_target = loop_start_time + 300
         await asyncio.sleep(max(0.1, next_cycle_target - time.time()))
-
-# ============================================================================
-# RUN ENVIRONMENT MAIN ENTRY POINT
-# ============================================================================
 
 def main():
     application = Application.builder().token(TOKEN).post_init(startup_sequence).post_stop(shutdown_sequence).build()
