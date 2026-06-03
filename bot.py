@@ -15,6 +15,7 @@ from scipy.signal import find_peaks
 import aiohttp
 import aiosqlite
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest  
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 # Logging setup
@@ -887,6 +888,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             
         async with STATE.waiting_lock: STATE.waiting_for_coin[chat_id] = time.time()
         await query.message.reply_text("📝 Pair ka naam send karo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
+        
     elif data.startswith("stop_") or data.startswith("view_"):
         is_stop = data.startswith("stop_")
         hash_fragment = data.replace("stop_", "") if is_stop else data.replace("view_", "")
@@ -898,18 +900,55 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
                     target_symbol = s
                     break
                     
-            if is_stop and target_symbol:
-                STATE.tracked_pairs[chat_id].remove(target_symbol)
-                await db_remove_pair_async(chat_id, target_symbol)
-                STATE.symbol_active_counts[target_symbol] = max(0, STATE.symbol_active_counts.get(target_symbol, 1) - 1)
-                
-        if target_symbol and is_stop:
+        if is_stop and target_symbol:
+            async with STATE.tracked_pairs_lock:
+                if target_symbol in STATE.tracked_pairs[chat_id]:
+                    STATE.tracked_pairs[chat_id].remove(target_symbol)
+            await db_remove_pair_async(chat_id, target_symbol)
+            STATE.symbol_active_counts[target_symbol] = max(0, STATE.symbol_active_counts.get(target_symbol, 1) - 1)
+            
             alert_key = f"{chat_id}:{target_symbol}"
             report_routing_key = f"{chat_id}_{target_symbol}"
             async with STATE.alert_lock: STATE.alert_cooldown.pop(alert_key, None)
             async with STATE.report_cooldown_lock: STATE.report_cooldown.pop(report_routing_key, None)
             await query.message.reply_text(f"🛑 <b>{html.escape(str(target_symbol))}</b> list se hat gaya aur database se saaf ho gaya.", parse_mode="HTML")
-        await query.edit_message_reply_markup(reply_markup=build_control_panel(chat_id))
+            
+        elif not is_stop and target_symbol:
+            # FIX: Real-time Single Asset Status Handler triggered on click transitions
+            async with STATE.computed_signals_lock:
+                data_matrix = STATE.computed_signals_matrix.get(target_symbol)
+                
+            if not data_matrix:
+                await query.message.reply_text(f"⏳ <b>COIN MONITORING LOADING UPDATES EVERY MINUTES:</b> {html.escape(str(target_symbol))}\nEngine analysis in progress, wait for the background cycle.", parse_mode="HTML")
+            else:
+                tf_scores = data_matrix["tf_scores"]
+                timeframe_data = data_matrix["timeframe_data"]
+                avg_score = sum(tf_scores) / len(tf_scores) if tf_scores else 0.0
+                direction_bias = "LONG 🟢" if avg_score >= 35 else ("SHORT 🔴" if avg_score <= -35 else "SIDE ⏳")
+                
+                view_msg = f"🛰️ <b>LIVE QUANT REPORT: {html.escape(str(target_symbol))}</b>\n"
+                view_msg += f"• Price: ${data_matrix['last_price']:,.4f} ({data_matrix['node_source']})\n"
+                view_msg += f"• Intel: {data_matrix['onchain_intel']}\n"
+                view_msg += f"• Bias: {direction_bias} (Avg Score: <code>{avg_score:+.1f}</code>)\n"
+                view_msg += "==================================\n"
+                view_msg += "<code>TF    TREND    MOVE     BOOK     FORECAST</code>\n"
+                view_msg += "----------------------------------\n"
+                
+                for tf in TIMEFRAMES:
+                    if tf in timeframe_data:
+                        sq, flow, pred, trend, _ = timeframe_data[tf]
+                        view_msg += f"<code>{tf:<6}{trend:<9}{sq:<9}{flow[:4]:<9}{pred}</code>\n"
+                view_msg += "==================================\n"
+                view_msg += "💡 <i>Updates tracking seamlessly inside operational arrays.</i>"
+                await query.message.reply_text(view_msg, parse_mode="HTML")
+            
+        try:
+            await query.edit_message_reply_markup(reply_markup=build_control_panel(chat_id))
+        except BadRequest as telegram_err:
+            if "Message is not modified" in str(telegram_err):
+                logging.info("Markup update skipped safely: Interface layouts match perfectly.")
+            else:
+                raise telegram_err
 
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != USER_CHAT_ID: return
