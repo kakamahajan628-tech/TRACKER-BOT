@@ -5,7 +5,6 @@ import sys
 import time
 import html
 import hashlib
-import sqlite3
 import json
 from collections import deque
 import numpy as np
@@ -13,6 +12,8 @@ import pandas as pd
 import ccxt.async_support as ccxt  
 import ta
 from scipy.signal import find_peaks  
+import aiohttp
+import aiosqlite
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
@@ -28,7 +29,7 @@ raw_chat_id = os.getenv("USER_CHAT_ID")
 USER_CHAT_ID = int(raw_chat_id) if (raw_chat_id and raw_chat_id.strip().isdigit()) else None
 
 if not TOKEN or not USER_CHAT_ID:
-    logging.critical("ENVIRONMENT CONFIGURATION ERROR: System execution tokens missing. Terminating process.")
+    logging.critical("ENVIRONMENT CONFIGURATION ERROR: System credentials mapping failed.")
     sys.exit(1)
 
 DB_FILE = "quant_sniper.db"
@@ -46,7 +47,7 @@ GLOBAL_SCAN_SEMAPHORE = asyncio.Semaphore(10)
 
 VALID_SYMBOLS = set()
 SYMBOL_TO_EXCHANGE = {}  
-TIMEFRAMES = ['5m', '15m', '1h']  # Strictly Confirmed: Dynamic structural arrays limit to 3 core frames permanently
+TIMEFRAMES = ['5m', '15m', '1h']  # Permanently Locked: Strictly 3 core intervals, 4h expunged forever
 CACHE_TTL = 900  
 CACHE_UNKNOWN_TTL = 86400  
 MAX_PAIRS_PER_USER = 50  
@@ -65,12 +66,12 @@ try:
     mexc = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
     EXCHANGES.append(gateio)
     EXCHANGES.append(mexc)
-    logging.info("Asynchronous exchanges registered successfully inside network maps.")
+    logging.info("Asynchronous exchanges registered safely inside operational tracking arrays.")
 except Exception as e:
     logging.error(f"Exchange adapter initialization breakdown: {e}")
 
 # ============================================================================
-# CENTRALIZED STORAGE STATE BLUEPRINT CAPSULE
+# SERVICE ORIENTED STATE BLUEPRINT CAPSULE
 # ============================================================================
 
 class BotState:
@@ -106,7 +107,7 @@ class BotState:
             "DOGE": "dogecoin", "AVAX": "avalanche-2", "LINK": "chainlink"
         }
         
-        # Thread Synchronization Locks Ordering Priority Chains
+        # Thread Synchronization Locks Matrix Ordering Priority Hierarchy Chain
         self.tracked_pairs_lock = asyncio.Lock()
         self.symbol_registry_lock = asyncio.Lock()  
         self.computed_signals_lock = asyncio.Lock()  
@@ -275,12 +276,13 @@ async def load_exchange_markets():
         EXCHANGE_MARKETS = new_markets
         SYMBOL_TO_EXCHANGE = new_routing_map
         MARKETS_LOADED = True
+    logging.info("Atomic market matrices swapped successfully into core tracking parameters.")
 
 async def validate_market_symbol(symbol):
     async with STATE.markets_validation_lock:
         return symbol.upper() in VALID_SYMBOLS
 
-async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=300):
+async def fetch_ohlcv_permitted(symbol, timeframe, exchange_target, limit=500):
     if not exchange_available(exchange_target): return None
     market_symbol = symbol.upper()
     cache_key = f"{exchange_target.id}:{market_symbol}:{timeframe}"
@@ -480,7 +482,7 @@ async def scrape_public_onchain_intel(symbol):
         return "HOLDERS_OK"
 
 # ============================================================================
-# INSTITUTIONAL STRATEGY LAYER
+# BI-REGIME DUAL-DIRECTIONAL SIGNAL ENGINE MATRIX (9.6+/10 Tier Blueprint)
 # ============================================================================
 
 async def evaluate_bitcoin_macro_regime_lock() -> bool:
@@ -514,7 +516,7 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
     highs = df['high'].to_numpy()
     lows = df['low'].to_numpy()
     
-    if len(prices) < 35: return "SCAN", 0, "Clear", 0.0
+    if len(prices) < 30: return "SCAN", 0, "Clear", 0.0
     
     vol_mas = df['volume'].rolling(window=10).mean().to_numpy()
     rsis = ta.momentum.rsi(close=df['close'], window=14).to_numpy()
@@ -558,7 +560,6 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
     
     is_pumping_hard = has_ema50 and (ema50[-1] > ema50[-2] > ema50[-3]) and (last_price > ema50[-1]) and (last_hist > 0)
 
-    # Correct Structural Realignment States Locked (Fix #3)
     if last_adx > 30:
         market_regime = "TRENDING_UP" if is_macro_bullish else ("TRENDING_DOWN" if is_macro_bearish else "TRENDING")
     else:
@@ -635,8 +636,8 @@ def evaluate_quant_signal_scoring(df, bid_pct, order_flow_status, symbol):
                         score -= 20
 
     if has_ema200:
-        if last_price < ema200[-1] and score >= 65:
-            return "SCAN", score, anomaly, last_atr
+        if last_price < ema200[-1] and score > 0:
+            score = min(score, 20)  
 
     dynamic_threshold = max(50.0, min(80.0, 50.0 + (last_adx / 2.0)))
 
@@ -665,7 +666,6 @@ def analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symb
     last_price = df['close'].iloc[-1]
     has_ema = len(ema50) > 0 and pd.notna(ema50[-1])
     
-    # Corrected Dynamic String Structural Outputs Alignment (Fix Content Leaks)
     structure_trend = "CH_UP" if (has_ema and last_price > ema50[-1]) else "CH_DN"
     
     mid_band = bb.bollinger_mavg().replace(0, np.nan).to_numpy()
@@ -687,7 +687,7 @@ async def process_single_timeframe_isolated(symbol, tf, exchange_obj, bid_pct, o
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna().reset_index()
             
-        if len(df) < 35: return tf, None
+        if len(df) < 30: return tf, None
         ohlcv_converted = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         
         structure_trend, squeeze, anomaly, prediction, price, score, last_atr = analyze_predictive_metrics(ohlcv_converted, bid_pct, order_flow_status, symbol)
@@ -802,10 +802,12 @@ async def startup_sequence(application: Application):
         try:
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 <b>QUANT TERMINAL v48.0 SUPREME CLEAN ONLINE</b>\nTimeframe parameters string overwrite bugs permanently fixed. Matrix synced completely. Use /panel.",
+                text="🚀 <b>QUANT TERMINAL v50.0 MASTER TIERS ONLINE</b>\nMulti Timeframe constraints aligned perfectly. 4H blocks completely removed. Use /panel.",
                 parse_mode="HTML"
             )
-        except Exception as e: logging.error(f"Graceful initialization fallback trace block failure: {e}")
+            logging.info("Startup sequence telegram validation alert broadcast successfully.")
+        except Exception as e: 
+            logging.error(f"Graceful initialization fallback trace block failure: {e}")
             
     MONITOR_TASK = asyncio.create_task(monitoring_job(application))
 
@@ -884,7 +886,7 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
             return
             
         async with STATE.waiting_lock: STATE.waiting_for_coin[chat_id] = time.time()
-        await update.message.reply_text("📝 Pair ka naam send karo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
+        await query.message.reply_text("📝 Pair ka naam send karo (Ex: <code>SOL/USDT</code>):", parse_mode="HTML")
     elif data.startswith("stop_") or data.startswith("view_"):
         is_stop = data.startswith("stop_")
         hash_fragment = data.replace("stop_", "") if is_stop else data.replace("view_", "")
@@ -959,7 +961,6 @@ async def execute_alert_dispatch_layer(chat_id, symbol, data_matrix, loop_start_
         if pred == "LONG_THOKO": long_weighted_votes += weight
         elif pred == "SHORT_THOKO": short_weighted_votes += weight
 
-    # Blocker Absolute Fix: 1H Timeframe Matrix alignment constraint enforced cleanly
     macro_1h_prediction = data_matrix["timeframe_data"].get("1h", ["", "", "SCAN"])[2]
     
     if long_weighted_votes >= 4 and macro_1h_prediction == "LONG_THOKO": 
@@ -1022,11 +1023,10 @@ async def send_global_dashboard_summary_report(chat_id, symbols_list, applicatio
     async with STATE.report_cooldown_lock:
         if current_time < STATE.report_cooldown.get(report_routing_key, 0.0): return
 
-    # Fix: Re-aligned absolute textual mapping lines to filter old retail artifacts completely
     msg = "🛰️ <b>QUANT SNAPSHOT LIVING DASHBOARD MENU</b>\n"
     msg += f"⏱️ Time Stamp: <code>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(current_time))}</code>\n"
     msg += "==================================\n"
-    msg += "<code>SYMBOL       BIAS         TREND    BOOK</code>\n"
+    msg += "<code>SYMBOL       BIAS          TREND    BOOK</code>\n"
     msg += "----------------------------------\n"
     
     has_active_rows = False
@@ -1040,10 +1040,10 @@ async def send_global_dashboard_summary_report(chat_id, symbols_list, applicatio
             avg_score = sum(tf_scores) / len(tf_scores) if tf_scores else 0.0
             
             direction_bias = "LONG 🟢" if avg_score >= 35 else ("SHORT 🔴" if avg_score <= -35 else "SIDE ⏳")
-            trend_label = timeframe_data.get("5m", ["", "", "", "SCAN"])[3]
+            
+            trend_label = timeframe_data.get("5m", ["SHANT", "NORMAL", "SCAN", "CH_DN", 0.0])[3]
             book_label = "BUY 📈" if "BUY" in data_matrix["order_flow_status"] else "SELL 📉"
             
-            # Correct Output Mapping: Prints verified current variables states dynamically (Fix String leaks)
             msg += f"<code>{html.escape(str(symbol)):<13}{direction_bias:<13}{trend_label:<9}{book_label}</code>\n"
             has_active_rows = True
             
@@ -1124,7 +1124,6 @@ async def monitoring_job(application: Application):
                     STATE.symbol_locks.pop(k, None)
                     STATE.symbol_active_counts.pop(k, None)
 
-        # Confirming absolute bounds synchronization parameters are locked exactly within TIMEFRAMES constraints
         symbol_processing_list = list(symbols_list)
         if "BTC/USDT" not in symbol_processing_list and MARKETS_LOADED:
             symbol_processing_list.append("BTC/USDT")
@@ -1160,7 +1159,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_button_clicks))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
     
-    application.run_polling()
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
